@@ -1,3 +1,4 @@
+//1.0
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -1004,6 +1005,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     console.log(`🔑 Using API key: ${apiKey.key_name}`);
 
     let commentsScraped = 0;
+    let commentsFailed = 0;
     let profilesScraped = 0;
     let profilesFromDb = 0;
     let profilesFailed = 0;
@@ -1535,4 +1537,5 @@ app.listen(PORT, () => {
   console.log(`🚀 LinkedIn Scraper API server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🔧 Test endpoint: http://localhost:${PORT}/api/test`);
+  console.log(`🌐 Frontend: http://localhost:${PORT}`);
 });
