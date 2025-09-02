@@ -1,4 +1,4 @@
-//fixed parallel processing
+//formating fixed
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -557,7 +557,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
           console.log(`📋 Profile already exists: ${profileUrl}`);
           return { profile: existingProfiles[0], fromDb: true };
         }
-
+        
         // Start the LinkedIn profile scraper actor
         const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', apiKey.api_key, {
           method: 'POST',
@@ -615,70 +615,123 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         // Process the scraped profile data
         const profileData = scrapedData[0]; // First item should be the profile data
         
-        // Insert new profile into global table with enhanced structure
-        const { data: newProfile, error: insertError } = await supabase
-          .from('linkedin_profiles')
-          .insert({
-            linkedin_url: profileUrl,
-            first_name: profileData.firstName,
-            last_name: profileData.lastName,
-            full_name: profileData.fullName,
-            headline: profileData.headline,
-            connections: profileData.connections,
-            followers: profileData.followers,
-            email: profileData.email,
-            mobile_number: profileData.mobileNumber,
-            job_title: profileData.jobTitle,
-            company_name: profileData.companyName,
-            company_industry: profileData.companyIndustry,
-            company_website: profileData.companyWebsite,
-            company_linkedin: profileData.companyLinkedin,
-            company_founded_in: profileData.companyFoundedIn,
-            company_size: profileData.companySize,
-            current_job_duration: profileData.currentJobDuration,
-            current_job_duration_in_yrs: profileData.currentJobDurationInYrs,
-            top_skills_by_endorsements: profileData.topSkillsByEndorsements,
-            address_country_only: profileData.addressCountryOnly,
-            address_with_country: profileData.addressWithCountry,
-            address_without_country: profileData.addressWithoutCountry,
-            profile_pic: profileData.profilePic,
-            profile_pic_high_quality: profileData.profilePicHighQuality,
-            about: profileData.about,
-            public_identifier: profileData.publicIdentifier,
-            open_connection: profileData.openConnection,
-            urn: profileData.urn,
-            creator_website: profileData.creatorWebsite,
-            experiences: profileData.experiences,
-            updates: profileData.updates,
-            skills: profileData.skills,
-            profile_pic_all_dimensions: profileData.profilePicAllDimensions,
-            educations: profileData.educations,
-            license_and_certificates: profileData.licenseAndCertificates,
-            honors_and_awards: profileData.honorsAndAwards,
-            languages: profileData.languages,
-            volunteer_and_awards: profileData.volunteerAndAwards,
-            verifications: profileData.verifications,
-            promos: profileData.promos,
-            highlights: profileData.highlights,
-            projects: profileData.projects,
-            publications: profileData.publications,
-            patents: profileData.patents,
-            courses: profileData.courses,
-            test_scores: profileData.testScores,
-            organizations: profileData.organizations,
-            volunteer_causes: profileData.volunteerCauses,
-            interests: profileData.interests,
-            recommendations: profileData.recommendations
-          })
-          .select()
-          .single();
+        // Debug: Log the raw data from Apify to understand the structure
+        console.log(`🔍 Raw profile data from Apify for ${profileUrl}:`, {
+          companyFoundedIn: profileData.companyFoundedIn,
+          currentJobDurationInYrs: profileData.currentJobDurationInYrs,
+          connections: profileData.connections,
+          followers: profileData.followers,
+          openConnection: profileData.openConnection
+        });
+        
+        // Helper function to safely convert values to integers
+        const safeInteger = (value) => {
+          if (value === null || value === undefined || value === '') return null;
+          const parsed = parseInt(value);
+          return isNaN(parsed) ? null : parsed;
+        };
 
-        if (insertError) {
-          console.error('Error inserting profile:', insertError);
-          throw new Error('Failed to save profile data');
+        // Helper function to safely convert values to numbers
+        const safeNumber = (value) => {
+          if (value === null || value === undefined || value === '') return null;
+          const parsed = parseFloat(value);
+          return isNaN(parsed) ? null : parsed;
+        };
+
+        // Helper function to safely convert values to strings
+        const safeString = (value) => {
+          if (value === null || value === undefined) return null;
+          return String(value).trim() || null;
+        };
+
+        // Helper function to safely convert values to booleans
+        const safeBoolean = (value) => {
+          if (value === null || value === undefined) return null;
+          if (typeof value === 'boolean') return value;
+          if (typeof value === 'string') {
+            const lower = value.toLowerCase();
+            return lower === 'true' || lower === '1' || lower === 'yes';
+          }
+          return Boolean(value);
+        };
+
+          // Insert new profile into global table with enhanced structure
+          const { data: newProfile, error: insertError } = await supabase
+            .from('linkedin_profiles')
+            .insert({
+            linkedin_url: safeString(profileUrl),
+            first_name: safeString(profileData.firstName),
+            last_name: safeString(profileData.lastName),
+            full_name: safeString(profileData.fullName),
+            headline: safeString(profileData.headline),
+            connections: safeInteger(profileData.connections),
+            followers: safeInteger(profileData.followers),
+            email: safeString(profileData.email),
+            mobile_number: safeString(profileData.mobileNumber),
+            job_title: safeString(profileData.jobTitle),
+            company_name: safeString(profileData.companyName),
+            company_industry: safeString(profileData.companyIndustry),
+            company_website: safeString(profileData.companyWebsite),
+            company_linkedin: safeString(profileData.companyLinkedin),
+            company_founded_in: safeInteger(profileData.companyFoundedIn),
+            company_size: safeString(profileData.companySize),
+            current_job_duration: safeString(profileData.currentJobDuration),
+            current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
+            top_skills_by_endorsements: profileData.topSkillsByEndorsements || null,
+            address_country_only: safeString(profileData.addressCountryOnly),
+            address_with_country: safeString(profileData.addressWithCountry),
+            address_without_country: safeString(profileData.addressWithoutCountry),
+            profile_pic: safeString(profileData.profilePic),
+            profile_pic_high_quality: safeString(profileData.profilePicHighQuality),
+            about: safeString(profileData.about),
+            public_identifier: safeString(profileData.publicIdentifier),
+            open_connection: safeBoolean(profileData.openConnection),
+            urn: safeString(profileData.urn),
+            creator_website: profileData.creatorWebsite || null,
+            experiences: profileData.experiences || null,
+            updates: profileData.updates || null,
+            skills: profileData.skills || null,
+            profile_pic_all_dimensions: profileData.profilePicAllDimensions || null,
+            educations: profileData.educations || null,
+            license_and_certificates: profileData.licenseAndCertificates || null,
+            honors_and_awards: profileData.honorsAndAwards || null,
+            languages: profileData.languages || null,
+            volunteer_and_awards: profileData.volunteerAndAwards || null,
+            verifications: profileData.verifications || null,
+            promos: profileData.promos || null,
+            highlights: profileData.highlights || null,
+            projects: profileData.projects || null,
+            publications: profileData.publications || null,
+            patents: profileData.patents || null,
+            courses: profileData.courses || null,
+            test_scores: profileData.testScores || null,
+            organizations: profileData.organizations || null,
+            volunteer_causes: profileData.volunteerCauses || null,
+            interests: profileData.interests || null,
+            recommendations: profileData.recommendations || null
+            })
+            .select()
+            .single();
+
+          if (insertError) {
+          console.error('❌ Database insertion error for profile:', profileUrl);
+          console.error('Error details:', insertError);
+          console.error('Profile data being inserted:', {
+            linkedin_url: safeString(profileUrl),
+            first_name: safeString(profileData.firstName),
+            last_name: safeString(profileData.lastName),
+            full_name: safeString(profileData.fullName),
+            headline: safeString(profileData.headline),
+            connections: safeInteger(profileData.connections),
+            followers: safeInteger(profileData.followers),
+            company_founded_in: safeInteger(profileData.companyFoundedIn),
+            current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
+            open_connection: safeBoolean(profileData.openConnection)
+          });
+          throw new Error(`Failed to save profile data: ${insertError.message}`);
         }
 
-        console.log(`✅ New profile saved: ${profileUrl}`);
+          console.log(`✅ New profile saved: ${profileUrl}`);
         return { profile: newProfile, fromDb: false };
 
       } catch (error) {
@@ -697,7 +750,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         const { profile, fromDb, error } = result.value;
         if (profile) {
           scrapedProfiles.push(profile);
-          profilesScraped++;
+        profilesScraped++;
         } else {
           profilesFailed++;
         }
@@ -707,12 +760,12 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       }
     });
 
-    // Update key usage
-    await supabase.from('api_keys').update({
-      last_used: new Date().toISOString(),
-      failure_count: 0,
-      status: 'active'
-    }).eq('id', apiKey.id);
+        // Update key usage
+        await supabase.from('api_keys').update({
+          last_used: new Date().toISOString(),
+          failure_count: 0,
+          status: 'active'
+        }).eq('id', apiKey.id);
 
     const processingTime = Date.now() - startTime;
 
@@ -1050,10 +1103,10 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
 
         if (comments.length > 0) {
           // Don't store comments in database - just return them for display
-          // Extract profile URL from comment actor
+              // Extract profile URL from comment actor
           for (const comment of comments) {
-            if (comment.actor && comment.actor.linkedinUrl) {
-              extractedProfileUrls.add(comment.actor.linkedinUrl);
+              if (comment.actor && comment.actor.linkedinUrl) {
+                extractedProfileUrls.add(comment.actor.linkedinUrl);
             }
           }
           
@@ -1141,67 +1194,108 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         const profileData = datasetResponse[0] || {};
 
         if (profileData && profileData.linkedinUrl) {
+          // Helper functions for data type conversion
+          const safeInteger = (value) => {
+            if (value === null || value === undefined || value === '') return null;
+            const parsed = parseInt(value);
+            return isNaN(parsed) ? null : parsed;
+          };
+
+          const safeNumber = (value) => {
+            if (value === null || value === undefined || value === '') return null;
+            const parsed = parseFloat(value);
+            return isNaN(parsed) ? null : parsed;
+          };
+
+          const safeString = (value) => {
+            if (value === null || value === undefined) return null;
+            return String(value).trim() || null;
+          };
+
+          const safeBoolean = (value) => {
+            if (value === null || value === undefined) return null;
+            if (typeof value === 'boolean') return value;
+            if (typeof value === 'string') {
+              const lower = value.toLowerCase();
+              return lower === 'true' || lower === '1' || lower === 'yes';
+            }
+            return Boolean(value);
+          };
+
           // Store profile in database
           const { data: newProfile, error: insertError } = await supabase
             .from('linkedin_profiles')
             .upsert({
-              linkedin_url: profileData.linkedinUrl,
-              first_name: profileData.firstName,
-              last_name: profileData.lastName,
-              full_name: profileData.fullName,
-              headline: profileData.headline,
-              connections: profileData.connections,
-              followers: profileData.followers,
-              email: profileData.email,
-              mobile_number: profileData.mobileNumber,
-              job_title: profileData.jobTitle,
-              company_name: profileData.companyName,
-              company_industry: profileData.companyIndustry,
-              company_website: profileData.companyWebsite,
-              company_linkedin: profileData.companyLinkedin,
-              company_founded_in: profileData.companyFoundedIn,
-              company_size: profileData.companySize,
-              current_job_duration: profileData.currentJobDuration,
-              current_job_duration_in_yrs: profileData.currentJobDurationInYrs,
-              top_skills_by_endorsements: profileData.topSkillsByEndorsements,
-              address_country_only: profileData.addressCountryOnly,
-              address_with_country: profileData.addressWithCountry,
-              address_without_country: profileData.addressWithoutCountry,
-              profile_pic: profileData.profilePic,
-              profile_pic_high_quality: profileData.profilePicHighQuality,
-              about: profileData.about,
-              public_identifier: profileData.publicIdentifier,
-              open_connection: profileData.openConnection,
-              urn: profileData.urn,
-              creator_website: profileData.creatorWebsite,
-              experiences: profileData.experiences,
-              updates: profileData.updates,
-              skills: profileData.skills,
-              profile_pic_all_dimensions: profileData.profilePicAllDimensions,
-              educations: profileData.educations,
-              license_and_certificates: profileData.licenseAndCertificates,
-              honors_and_awards: profileData.honorsAndAwards,
-              languages: profileData.languages,
-              volunteer_and_awards: profileData.volunteerAndAwards,
-              verifications: profileData.verifications,
-              promos: profileData.promos,
-              highlights: profileData.highlights,
-              projects: profileData.projects,
-              publications: profileData.publications,
-              patents: profileData.patents,
-              courses: profileData.courses,
-              test_scores: profileData.testScores,
-              organizations: profileData.organizations,
-              volunteer_causes: profileData.volunteerCauses,
-              interests: profileData.interests,
-              recommendations: profileData.recommendations
+              linkedin_url: safeString(profileData.linkedinUrl),
+              first_name: safeString(profileData.firstName),
+              last_name: safeString(profileData.lastName),
+              full_name: safeString(profileData.fullName),
+              headline: safeString(profileData.headline),
+              connections: safeInteger(profileData.connections),
+              followers: safeInteger(profileData.followers),
+              email: safeString(profileData.email),
+              mobile_number: safeString(profileData.mobileNumber),
+              job_title: safeString(profileData.jobTitle),
+              company_name: safeString(profileData.companyName),
+              company_industry: safeString(profileData.companyIndustry),
+              company_website: safeString(profileData.companyWebsite),
+              company_linkedin: safeString(profileData.companyLinkedin),
+              company_founded_in: safeInteger(profileData.companyFoundedIn),
+              company_size: safeString(profileData.companySize),
+              current_job_duration: safeString(profileData.currentJobDuration),
+              current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
+              top_skills_by_endorsements: profileData.topSkillsByEndorsements || null,
+              address_country_only: safeString(profileData.addressCountryOnly),
+              address_with_country: safeString(profileData.addressWithCountry),
+              address_without_country: safeString(profileData.addressWithoutCountry),
+              profile_pic: safeString(profileData.profilePic),
+              profile_pic_high_quality: safeString(profileData.profilePicHighQuality),
+              about: safeString(profileData.about),
+              public_identifier: safeString(profileData.publicIdentifier),
+              open_connection: safeBoolean(profileData.openConnection),
+              urn: safeString(profileData.urn),
+              creator_website: profileData.creatorWebsite || null,
+              experiences: profileData.experiences || null,
+              updates: profileData.updates || null,
+              skills: profileData.skills || null,
+              profile_pic_all_dimensions: profileData.profilePicAllDimensions || null,
+              educations: profileData.educations || null,
+              license_and_certificates: profileData.licenseAndCertificates || null,
+              honors_and_awards: profileData.honorsAndAwards || null,
+              languages: profileData.languages || null,
+              volunteer_and_awards: profileData.volunteerAndAwards || null,
+              verifications: profileData.verifications || null,
+              promos: profileData.promos || null,
+              highlights: profileData.highlights || null,
+              projects: profileData.projects || null,
+              publications: profileData.publications || null,
+              patents: profileData.patents || null,
+              courses: profileData.courses || null,
+              test_scores: profileData.testScores || null,
+              organizations: profileData.organizations || null,
+              volunteer_causes: profileData.volunteerCauses || null,
+              interests: profileData.interests || null,
+              recommendations: profileData.recommendations || null
             }, { onConflict: 'linkedin_url' })
             .select()
             .single();
 
           if (insertError) {
-            console.error('Error inserting profile:', insertError);
-            return { error: insertError.message };
+            console.error('❌ Database insertion error for profile:', profileData.linkedinUrl);
+            console.error('Error details:', insertError);
+            console.error('Profile data being inserted:', {
+              linkedin_url: safeString(profileData.linkedinUrl),
+              first_name: safeString(profileData.firstName),
+              last_name: safeString(profileData.lastName),
+              full_name: safeString(profileData.fullName),
+              headline: safeString(profileData.headline),
+              connections: safeInteger(profileData.connections),
+              followers: safeInteger(profileData.followers),
+              company_founded_in: safeInteger(profileData.companyFoundedIn),
+              current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
+              open_connection: safeBoolean(profileData.openConnection)
+            });
+            return { error: `Failed to save profile data: ${insertError.message}` };
           } else {
             console.log(`✅ Profile scraped and stored: ${profileUrl}`);
             return { profile: newProfile, fromDb: false };
