@@ -1,4 +1,4 @@
-//2
+//fixed parallel processing
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -538,11 +538,26 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     let profilesScraped = 0;
     let profilesFailed = 0;
 
-    // Scrape each profile using the Make.com workflow via Apify
-    for (const profileUrl of validUrls) {
+    // 🚀 PARALLEL PROFILE SCRAPING - Process all profiles simultaneously
+    console.log(`🚀 Starting parallel scraping of ${validUrls.length} profiles...`);
+    
+    // Helper function to process a single profile
+    const processProfile = async (profileUrl) => {
       try {
         console.log(`🔍 Scraping profile: ${profileUrl}`);
         
+        // First, check if profile already exists in global table
+        const { data: existingProfiles } = await supabase
+          .from('linkedin_profiles')
+          .select('*')
+          .eq('linkedin_url', profileUrl)
+          .limit(1);
+
+        if (existingProfiles && existingProfiles.length > 0) {
+          console.log(`📋 Profile already exists: ${profileUrl}`);
+          return { profile: existingProfiles[0], fromDb: true };
+        }
+
         // Start the LinkedIn profile scraper actor
         const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', apiKey.api_key, {
           method: 'POST',
@@ -600,116 +615,104 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         // Process the scraped profile data
         const profileData = scrapedData[0]; // First item should be the profile data
         
-        // Check if profile already exists in global table
-        let existingProfile = null;
-        const { data: existingProfiles } = await supabase
+        // Insert new profile into global table with enhanced structure
+        const { data: newProfile, error: insertError } = await supabase
           .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-          .limit(1);
+          .insert({
+            linkedin_url: profileUrl,
+            first_name: profileData.firstName,
+            last_name: profileData.lastName,
+            full_name: profileData.fullName,
+            headline: profileData.headline,
+            connections: profileData.connections,
+            followers: profileData.followers,
+            email: profileData.email,
+            mobile_number: profileData.mobileNumber,
+            job_title: profileData.jobTitle,
+            company_name: profileData.companyName,
+            company_industry: profileData.companyIndustry,
+            company_website: profileData.companyWebsite,
+            company_linkedin: profileData.companyLinkedin,
+            company_founded_in: profileData.companyFoundedIn,
+            company_size: profileData.companySize,
+            current_job_duration: profileData.currentJobDuration,
+            current_job_duration_in_yrs: profileData.currentJobDurationInYrs,
+            top_skills_by_endorsements: profileData.topSkillsByEndorsements,
+            address_country_only: profileData.addressCountryOnly,
+            address_with_country: profileData.addressWithCountry,
+            address_without_country: profileData.addressWithoutCountry,
+            profile_pic: profileData.profilePic,
+            profile_pic_high_quality: profileData.profilePicHighQuality,
+            about: profileData.about,
+            public_identifier: profileData.publicIdentifier,
+            open_connection: profileData.openConnection,
+            urn: profileData.urn,
+            creator_website: profileData.creatorWebsite,
+            experiences: profileData.experiences,
+            updates: profileData.updates,
+            skills: profileData.skills,
+            profile_pic_all_dimensions: profileData.profilePicAllDimensions,
+            educations: profileData.educations,
+            license_and_certificates: profileData.licenseAndCertificates,
+            honors_and_awards: profileData.honorsAndAwards,
+            languages: profileData.languages,
+            volunteer_and_awards: profileData.volunteerAndAwards,
+            verifications: profileData.verifications,
+            promos: profileData.promos,
+            highlights: profileData.highlights,
+            projects: profileData.projects,
+            publications: profileData.publications,
+            patents: profileData.patents,
+            courses: profileData.courses,
+            test_scores: profileData.testScores,
+            organizations: profileData.organizations,
+            volunteer_causes: profileData.volunteerCauses,
+            interests: profileData.interests,
+            recommendations: profileData.recommendations
+          })
+          .select()
+          .single();
 
-        if (existingProfiles && existingProfiles.length > 0) {
-          existingProfile = existingProfiles[0];
-          console.log(`📋 Profile already exists: ${profileUrl}`);
-        } else {
-          // Insert new profile into global table with enhanced structure
-          const { data: newProfile, error: insertError } = await supabase
-            .from('linkedin_profiles')
-            .insert({
-              linkedin_url: profileUrl,
-              first_name: profileData.firstName,
-              last_name: profileData.lastName,
-              full_name: profileData.fullName,
-              headline: profileData.headline,
-              connections: profileData.connections,
-              followers: profileData.followers,
-              email: profileData.email,
-              mobile_number: profileData.mobileNumber,
-              job_title: profileData.jobTitle,
-              company_name: profileData.companyName,
-              company_industry: profileData.companyIndustry,
-              company_website: profileData.companyWebsite,
-              company_linkedin: profileData.companyLinkedin,
-              company_founded_in: profileData.companyFoundedIn,
-              company_size: profileData.companySize,
-              current_job_duration: profileData.currentJobDuration,
-              current_job_duration_in_yrs: profileData.currentJobDurationInYrs,
-              top_skills_by_endorsements: profileData.topSkillsByEndorsements,
-              address_country_only: profileData.addressCountryOnly,
-              address_with_country: profileData.addressWithCountry,
-              address_without_country: profileData.addressWithoutCountry,
-              profile_pic: profileData.profilePic,
-              profile_pic_high_quality: profileData.profilePicHighQuality,
-              about: profileData.about,
-              public_identifier: profileData.publicIdentifier,
-              open_connection: profileData.openConnection,
-              urn: profileData.urn,
-              creator_website: profileData.creatorWebsite,
-              experiences: profileData.experiences,
-              updates: profileData.updates,
-              skills: profileData.skills,
-              profile_pic_all_dimensions: profileData.profilePicAllDimensions,
-              educations: profileData.educations,
-              license_and_certificates: profileData.licenseAndCertificates,
-              honors_and_awards: profileData.honorsAndAwards,
-              languages: profileData.languages,
-              volunteer_and_awards: profileData.volunteerAndAwards,
-              verifications: profileData.verifications,
-              promos: profileData.promos,
-              highlights: profileData.highlights,
-              projects: profileData.projects,
-              publications: profileData.publications,
-              patents: profileData.patents,
-              courses: profileData.courses,
-              test_scores: profileData.testScores,
-              organizations: profileData.organizations,
-              volunteer_causes: profileData.volunteerCauses,
-              interests: profileData.interests,
-              recommendations: profileData.recommendations
-            })
-            .select()
-            .single();
-
-          if (insertError) {
-            console.error('Error inserting profile:', insertError);
-            throw new Error('Failed to save profile data');
-          }
-
-          existingProfile = newProfile;
-          console.log(`✅ New profile saved: ${profileUrl}`);
+        if (insertError) {
+          console.error('Error inserting profile:', insertError);
+          throw new Error('Failed to save profile data');
         }
 
-        // Add to scraped profiles array
-        scrapedProfiles.push(existingProfile);
-        profilesScraped++;
-
-        // Update key usage
-        await supabase.from('api_keys').update({
-          last_used: new Date().toISOString(),
-          failure_count: 0,
-          status: 'active'
-        }).eq('id', apiKey.id);
+        console.log(`✅ New profile saved: ${profileUrl}`);
+        return { profile: newProfile, fromDb: false };
 
       } catch (error) {
         console.error(`❌ Error scraping profile ${profileUrl}:`, error.message);
-        profilesFailed++;
-        
-        // Mark key as failed if it's an API error
-        if (error.message.includes('Invalid API key') || error.message.includes('Rate limited')) {
-          failedKeysInRequest.add(apiKey.id);
-          
-          try {
-            await supabase.from('api_keys').update({
-              status: error.message.includes('Rate limited') ? 'rate_limited' : 'failed',
-              last_failed: new Date().toISOString(),
-              failure_count: (apiKey.failure_count || 0) + 1
-            }).eq('id', apiKey.id);
-          } catch (updateError) {
-            console.warn('Failed to update key status:', updateError.message);
-          }
-        }
+        return { error: error.message };
       }
-    }
+    };
+
+    // Process all profiles in parallel using Promise.allSettled
+    const profilePromises = validUrls.map(profileUrl => processProfile(profileUrl));
+    const results = await Promise.allSettled(profilePromises);
+
+    // Process results
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        const { profile, fromDb, error } = result.value;
+        if (profile) {
+          scrapedProfiles.push(profile);
+          profilesScraped++;
+        } else {
+          profilesFailed++;
+        }
+      } else {
+        console.error(`❌ Profile processing failed: ${validUrls[index]}`, result.reason);
+        profilesFailed++;
+      }
+    });
+
+    // Update key usage
+    await supabase.from('api_keys').update({
+      last_used: new Date().toISOString(),
+      failure_count: 0,
+      status: 'active'
+    }).eq('id', apiKey.id);
 
     const processingTime = Date.now() - startTime;
 
