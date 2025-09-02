@@ -1,4 +1,4 @@
-//1.0
+//2
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -877,28 +877,7 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
         const comments = datasetResponse || [];
 
         if (comments.length > 0) {
-          // Store comments in database
-          for (const comment of comments) {
-            try {
-              await supabase.from('linkedin_post_comments').upsert({
-                comment_id: comment.id,
-                linkedin_url: comment.linkedinUrl,
-                commentary: comment.commentary,
-                created_at_comment: comment.createdAt ? new Date(comment.createdAt) : null,
-                created_at_timestamp: comment.createdAtTimestamp,
-                engagement: comment.engagement,
-                post_id: comment.postId,
-                pinned: comment.pinned,
-                contributed: comment.contributed,
-                edited: comment.edited,
-                actor: comment.actor,
-                query: comment.query
-              }, { onConflict: 'comment_id' });
-            } catch (dbError) {
-              console.warn('⚠️ Failed to store comment:', dbError.message);
-            }
-          }
-          
+          // Don't store comments in database - just return them for display
           allComments.push(...comments);
           commentsScraped += comments.length;
         } else {
@@ -1067,30 +1046,11 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         const comments = datasetResponse || [];
 
         if (comments.length > 0) {
-          // Store comments in database
+          // Don't store comments in database - just return them for display
+          // Extract profile URL from comment actor
           for (const comment of comments) {
-            try {
-              await supabase.from('linkedin_post_comments').upsert({
-                comment_id: comment.id,
-                linkedin_url: comment.linkedinUrl,
-                commentary: comment.commentary,
-                created_at_comment: comment.createdAt ? new Date(comment.createdAt) : null,
-                created_at_timestamp: comment.createdAtTimestamp,
-                engagement: comment.engagement,
-                post_id: comment.postId,
-                pinned: comment.pinned,
-                contributed: comment.contributed,
-                edited: comment.edited,
-                actor: comment.actor,
-                query: comment.query
-              }, { onConflict: 'comment_id' });
-
-              // Extract profile URL from comment actor
-              if (comment.actor && comment.actor.linkedinUrl) {
-                extractedProfileUrls.add(comment.actor.linkedinUrl);
-              }
-            } catch (dbError) {
-              console.warn('⚠️ Failed to store comment:', dbError.message);
+            if (comment.actor && comment.actor.linkedinUrl) {
+              extractedProfileUrls.add(comment.actor.linkedinUrl);
             }
           }
           
