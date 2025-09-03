@@ -1,4 +1,4 @@
-//FIXED: System Now Always Returns Results to User
+//implementing immediate key rotation when a key fails during a request
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -601,51 +601,30 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     // Helper function to process a single profile with an assigned key
     const processProfile = async (profileUrl, initialKey) => {
       let currentApiKey = initialKey;
-      try {
-        console.log(`🔍 Scraping profile: ${profileUrl}`);
-        
-        // First, check if profile already exists in global table
-        const { data: existingProfiles } = await supabase
-          .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-          .limit(1);
+      let attempts = 0;
+      const maxAttempts = Math.min(3, selectedKeys.length); // Try up to 3 different keys
+      
+      while (attempts < maxAttempts) {
+        try {
+          console.log(`🔍 Scraping profile: ${profileUrl} (attempt ${attempts + 1}/${maxAttempts})`);
+          
+          // First, check if profile already exists in global table
+          const { data: existingProfiles } = await supabase
+            .from('linkedin_profiles')
+            .select('*')
+            .eq('linkedin_url', profileUrl)
+            .limit(1);
 
-        if (existingProfiles && existingProfiles.length > 0) {
-          console.log(`📋 Profile already exists: ${profileUrl}`);
-          return { profile: existingProfiles[0], fromDb: true };
-        }
-        
-        // Start the LinkedIn profile scraper actor with key-rotation on failure
-        const startActor = async () => {
-          return await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', currentApiKey.api_key, {
-          method: 'POST',
+          if (existingProfiles && existingProfiles.length > 0) {
+            console.log(`📋 Profile already exists: ${profileUrl}`);
+            return { profile: existingProfiles[0], fromDb: true };
+          }
+          
+          // Start the LinkedIn profile scraper actor
+          const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', currentApiKey.api_key, {
+            method: 'POST',
             body: { profileUrls: [profileUrl] }
           });
-        };
-
-        let actorRun;
-        try {
-          actorRun = await startActor();
-        } catch (err) {
-          const msg = String(err?.message || '');
-          if (msg.includes('Insufficient credits') || msg.includes('Rate limited') || msg.includes('Invalid API key')) {
-            await supabase.from('api_keys').update({
-              status: msg.includes('Rate limited') ? 'rate_limited' : 'failed',
-              last_failed: new Date().toISOString()
-            }).eq('id', currentApiKey.id);
-            failedKeysInRequest.add(currentApiKey.id);
-            try {
-              const replacement = await getReplacementKey(supabase, req.user.id, 'apify', failedKeysInRequest, recentlyActivatedKeys);
-              currentApiKey = replacement;
-              actorRun = await startActor();
-            } catch (_) {
-              throw err;
-            }
-          } else {
-            throw err;
-          }
-        }
 
         if (!actorRun.data?.id) {
           throw new Error('Failed to start actor run');
@@ -835,10 +814,36 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
 
         return { profile: newProfile, fromDb: false };
 
-      } catch (error) {
-        console.error(`❌ Error scraping profile ${profileUrl}:`, error.message);
-        return { error: error.message };
+        } catch (error) {
+          console.error(`❌ Failed to scrape profile ${profileUrl} with key ${currentApiKey.key_name}:`, error.message);
+          
+          // Check if this is an account limit error
+          if (error.message.includes('Monthly usage hard limit exceeded') || 
+              error.message.includes('platform-feature-disabled') ||
+              error.message.includes('Insufficient credits')) {
+            console.log(`💳 Account limit detected for key ${currentApiKey.key_name} - marking as failed`);
+            // Mark this key as failed in the database
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString()
+            }).eq('id', currentApiKey.id);
+          }
+          
+          attempts++;
+          if (attempts < maxAttempts) {
+            // Try next key
+            const nextKeyIndex = (selectedKeys.indexOf(initialKey) + attempts) % selectedKeys.length;
+            currentApiKey = selectedKeys[nextKeyIndex];
+            console.log(`🔄 Retrying with next key: ${currentApiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+          } else {
+            console.log(`❌ All attempts failed for profile ${profileUrl}`);
+            return { error: error.message };
+          }
+        }
       }
+      
+      // If we get here, all attempts failed
+      return { error: 'All key attempts failed' };
     };
 
     // Process ALL batches in parallel, each batch assigned a key via round-robin
@@ -1078,17 +1083,21 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
 
     // Scrape each post for comments in parallel, round-robin assign keys per post
     const commentPromises = validUrls.map(async (postUrl, idx) => {
-      const apiKey = selectedKeys[Math.max(0, idx % Math.max(1, selectedKeys.length))];
-      try {
-        console.log(`🔍 Scraping post comments: ${postUrl}`);
-        
-        // Use the post comments actor: ZI6ykbLlGS3APaPE8
-        const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
-          method: 'POST',
-          body: {
-            posts: [postUrl]
-          }
-        });
+      let apiKey = selectedKeys[Math.max(0, idx % Math.max(1, selectedKeys.length))];
+      let attempts = 0;
+      const maxAttempts = Math.min(3, selectedKeys.length); // Try up to 3 different keys
+      
+      while (attempts < maxAttempts) {
+        try {
+          console.log(`🔍 Scraping post comments: ${postUrl} (attempt ${attempts + 1}/${maxAttempts})`);
+          
+          // Use the post comments actor: ZI6ykbLlGS3APaPE8
+          const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
+            method: 'POST',
+            body: {
+              posts: [postUrl]
+            }
+          });
 
         if (!actorRun.data?.id) {
           throw new Error('Failed to start actor run');
@@ -1130,30 +1139,42 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
         const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, apiKey.api_key);
         const comments = datasetResponse || [];
 
-        if (comments.length > 0) {
-          // Don't store comments in database - just return them for display
-          allComments.push(...comments);
-          commentsScraped += comments.length;
-        } else {
-          commentsFailed++;
-        }
+          if (comments.length > 0) {
+            // Don't store comments in database - just return them for display
+            allComments.push(...comments);
+            commentsScraped += comments.length;
+            break; // Success, exit retry loop
+          } else {
+            commentsFailed++;
+            break; // No comments found, exit retry loop
+          }
 
-      } catch (error) {
-        console.error(`❌ Failed to scrape post ${postUrl}:`, error.message);
-        
-        // Check if this is an account limit error
-        if (error.message.includes('Monthly usage hard limit exceeded') || 
-            error.message.includes('platform-feature-disabled') ||
-            error.message.includes('Insufficient credits')) {
-          console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
-          // Mark this key as failed in the database
-          await supabase.from('api_keys').update({
-            status: 'failed',
-            last_failed: new Date().toISOString()
-          }).eq('id', apiKey.id);
+        } catch (error) {
+          console.error(`❌ Failed to scrape post ${postUrl} with key ${apiKey.key_name}:`, error.message);
+          
+          // Check if this is an account limit error
+          if (error.message.includes('Monthly usage hard limit exceeded') || 
+              error.message.includes('platform-feature-disabled') ||
+              error.message.includes('Insufficient credits')) {
+            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
+            // Mark this key as failed in the database
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString()
+            }).eq('id', apiKey.id);
+          }
+          
+          attempts++;
+          if (attempts < maxAttempts) {
+            // Try next key
+            const nextKeyIndex = (idx + attempts) % selectedKeys.length;
+            apiKey = selectedKeys[nextKeyIndex];
+            console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+          } else {
+            console.log(`❌ All attempts failed for post ${postUrl}`);
+            commentsFailed++;
+          }
         }
-        
-        commentsFailed++;
       }
     });
 
@@ -1283,10 +1304,14 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       });
     }
     const commentPromises = validPostUrls.map(async (postUrl, idx) => {
-      const apiKey = commentKeys[Math.max(0, idx % Math.max(1, commentKeys.length))];
-      try {
-        console.log(`🔍 Scraping post comments: ${postUrl}`);
-        const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
+      let apiKey = commentKeys[Math.max(0, idx % Math.max(1, commentKeys.length))];
+      let attempts = 0;
+      const maxAttempts = Math.min(3, commentKeys.length); // Try up to 3 different keys
+      
+      while (attempts < maxAttempts) {
+        try {
+          console.log(`🔍 Scraping post comments: ${postUrl} (attempt ${attempts + 1}/${maxAttempts})`);
+          const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
           method: 'POST',
           body: { posts: [postUrl] }
         });
@@ -1314,33 +1339,45 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, apiKey.api_key);
         const comments = datasetResponse || [];
 
-        if (comments.length > 0) {
-          for (const comment of comments) {
-              if (comment.actor && comment.actor.linkedinUrl) {
-                extractedProfileUrls.add(comment.actor.linkedinUrl);
+          if (comments.length > 0) {
+            for (const comment of comments) {
+                if (comment.actor && comment.actor.linkedinUrl) {
+                  extractedProfileUrls.add(comment.actor.linkedinUrl);
+              }
             }
+            allComments.push(...comments);
+            commentsScraped += comments.length;
+            break; // Success, exit retry loop
+          } else {
+            commentsFailed++;
+            break; // No comments found, exit retry loop
           }
-          allComments.push(...comments);
-          commentsScraped += comments.length;
-        } else {
-          commentsFailed++;
+        } catch (error) {
+          console.error(`❌ Failed to scrape post ${postUrl} with key ${apiKey.key_name}:`, error.message);
+          
+          // Check if this is an account limit error
+          if (error.message.includes('Monthly usage hard limit exceeded') || 
+              error.message.includes('platform-feature-disabled') ||
+              error.message.includes('Insufficient credits')) {
+            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
+            // Mark this key as failed in the database
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString()
+            }).eq('id', apiKey.id);
+          }
+          
+          attempts++;
+          if (attempts < maxAttempts) {
+            // Try next key
+            const nextKeyIndex = (idx + attempts) % commentKeys.length;
+            apiKey = commentKeys[nextKeyIndex];
+            console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+          } else {
+            console.log(`❌ All attempts failed for post ${postUrl}`);
+            commentsFailed++;
+          }
         }
-      } catch (error) {
-        console.error(`❌ Failed to scrape post ${postUrl}:`, error.message);
-        
-        // Check if this is an account limit error
-        if (error.message.includes('Monthly usage hard limit exceeded') || 
-            error.message.includes('platform-feature-disabled') ||
-            error.message.includes('Insufficient credits')) {
-          console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
-          // Mark this key as failed in the database
-          await supabase.from('api_keys').update({
-            status: 'failed',
-            last_failed: new Date().toISOString()
-          }).eq('id', apiKey.id);
-        }
-        
-        commentsFailed++;
       }
     });
     await Promise.allSettled(commentPromises);
@@ -1379,29 +1416,33 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     // Helper function to process a single profile (with a batch-assigned key)
     const processProfile = async (profileUrl, assignedKey) => {
       let apiKey = assignedKey;
-      try {
-        // First, check if profile exists in our database
-        const { data: existingProfile, error: dbError } = await supabase
-          .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-          .single();
+      let attempts = 0;
+      const maxAttempts = Math.min(3, selectedKeys.length); // Try up to 3 different keys
+      
+      while (attempts < maxAttempts) {
+        try {
+          // First, check if profile exists in our database
+          const { data: existingProfile, error: dbError } = await supabase
+            .from('linkedin_profiles')
+            .select('*')
+            .eq('linkedin_url', profileUrl)
+            .single();
 
-        if (existingProfile && !dbError) {
-          console.log(`✅ Profile found in database: ${profileUrl}`);
-          return { profile: existingProfile, fromDb: true };
-        }
-
-        // Profile not in database, scrape it using Apify
-        console.log(`🔄 Scraping profile: ${profileUrl}`);
-        
-        // Use the profile details actor: 2SyF0bVxmgGr8IVCZ
-        const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', apiKey.api_key, {
-          method: 'POST',
-          body: {
-            profileUrls: [profileUrl]
+          if (existingProfile && !dbError) {
+            console.log(`✅ Profile found in database: ${profileUrl}`);
+            return { profile: existingProfile, fromDb: true };
           }
-        });
+
+          // Profile not in database, scrape it using Apify
+          console.log(`🔄 Scraping profile: ${profileUrl} (attempt ${attempts + 1}/${maxAttempts})`);
+          
+          // Use the profile details actor: 2SyF0bVxmgGr8IVCZ
+          const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', apiKey.api_key, {
+            method: 'POST',
+            body: {
+              profileUrls: [profileUrl]
+            }
+          });
 
         if (!actorRun.data?.id) {
           throw new Error('Failed to start actor run');
@@ -1573,10 +1614,36 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
           return { error: 'No profile data received' };
         }
 
-      } catch (error) {
-        console.error(`❌ Failed to process profile ${profileUrl}:`, error.message);
-        return { error: error.message };
+        } catch (error) {
+          console.error(`❌ Failed to process profile ${profileUrl} with key ${apiKey.key_name}:`, error.message);
+          
+          // Check if this is an account limit error
+          if (error.message.includes('Monthly usage hard limit exceeded') || 
+              error.message.includes('platform-feature-disabled') ||
+              error.message.includes('Insufficient credits')) {
+            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
+            // Mark this key as failed in the database
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString()
+            }).eq('id', apiKey.id);
+          }
+          
+          attempts++;
+          if (attempts < maxAttempts) {
+            // Try next key
+            const nextKeyIndex = (selectedKeys.indexOf(assignedKey) + attempts) % selectedKeys.length;
+            apiKey = selectedKeys[nextKeyIndex];
+            console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+          } else {
+            console.log(`❌ All attempts failed for profile ${profileUrl}`);
+            return { error: error.message };
+          }
+        }
       }
+      
+      // If we get here, all attempts failed
+      return { error: 'All key attempts failed' };
     };
 
     // Process ALL profile batches in parallel, each batch assigned a key via round-robin
