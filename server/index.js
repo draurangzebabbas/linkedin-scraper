@@ -1,4 +1,4 @@
-//Moved batch construction and key assignment to after allProfileUrls is computed.
+//apify key defined error fixed
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -45,7 +45,7 @@ app.use(express.json({ limit: '1mb' }));
 // Serve frontend if build exists; otherwise provide a simple root response
 import fs from 'fs';
 if (fs.existsSync('dist')) {
-  app.use(express.static('dist'));
+app.use(express.static('dist'));
 } else {
   app.get('/', (req, res) => {
     res.send('Backend is running. Build the frontend to serve static files.');
@@ -511,8 +511,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     // Validate and sanitize profile URLs
     const validUrls = profileUrls
       .map(u => normalizeLinkedInUrl(u))
-      .filter(url => url && url.includes('linkedin.com/in/'))
-      .slice(0, 10); // Limit to 10 profiles per request
+      .filter(url => url && url.includes('linkedin.com/in/'));
 
     if (validUrls.length === 0) {
       return res.status(400).json({ 
@@ -578,7 +577,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     }
 
     console.log(`🔑 Found ${selectedKeys.length} Apify API keys for user ${req.user.id}`);
-
+    
     const scrapedProfiles = [];
     let profilesScraped = 0;
     let profilesFailed = 0;
@@ -607,7 +606,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         // Start the LinkedIn profile scraper actor with key-rotation on failure
         const startActor = async () => {
           return await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', currentApiKey.api_key, {
-            method: 'POST',
+          method: 'POST',
             body: { profileUrls: [profileUrl] }
           });
         };
@@ -843,17 +842,17 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         const results = batchResult.value;
         results.forEach((result, i) => {
           const url = batches[bIdx][i];
-          if (result.status === 'fulfilled') {
+      if (result.status === 'fulfilled') {
             const { profile } = result.value;
-            if (profile) {
-              scrapedProfiles.push(profile);
-              profilesScraped++;
-            } else {
-              profilesFailed++;
-            }
-          } else {
+        if (profile) {
+          scrapedProfiles.push(profile);
+        profilesScraped++;
+        } else {
+          profilesFailed++;
+        }
+      } else {
             console.error(`❌ Profile processing failed: ${url}`, result.reason);
-            profilesFailed++;
+        profilesFailed++;
           }
         });
       } else {
@@ -872,14 +871,15 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
           }).filter(Boolean)
         );
         for (const keyId of usedKeyIds) {
-          await supabase.from('api_keys').update({
-            last_used: new Date().toISOString(),
-            failure_count: 0,
-            status: 'active'
+        await supabase.from('api_keys').update({
+          last_used: new Date().toISOString(),
+          failure_count: 0,
+          status: 'active'
           }).eq('id', keyId);
         }
 
     const processingTime = Date.now() - startTime;
+    const apiKeysUsed = usedKeyIds.size;
 
     // Update the log with results
     if (logId) {
@@ -888,7 +888,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         .update({
           status: profilesFailed === 0 ? 'completed' : 'failed',
           api_key_used: selectedKeys[0]?.id || null,
-          profiles_scraped: profilesScraped,
+      profiles_scraped: profilesScraped,
           profiles_failed: profilesFailed,
           completed_at: new Date().toISOString()
         })
@@ -946,7 +946,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       profiles_scraped: profilesScraped,
       profiles_failed: profilesFailed,
       processing_time: processingTime,
-      api_keys_used: 1,
+      api_keys_used: apiKeysUsed,
       profiles: scrapedProfiles,
       status: profilesFailed === 0 ? 'completed' : 'partial',
       auto_saved: saveAllProfiles ? scrapedProfiles.length : 0
@@ -1035,14 +1035,9 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
       console.warn('⚠️ Failed to log request to database:', dbError.message);
     }
 
-    // Determine batches and request keys accordingly (round-robin per batch)
-    const BATCH_SIZE = 50;
-    const commenterBatches = [];
+    // Determine required keys for round-robin per post
     const failedKeysInRequest = new Set();
-    for (let i = 0; i < validUrls.length; i += 1) {
-      commenterBatches.push([validUrls[i]]);
-    }
-    const requiredKeyCount = Math.max(1, commenterBatches.length);
+    const requiredKeyCount = Math.max(1, validUrls.length);
 
     // Get Apify keys for scraping (round-robin across comment runs)
     const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, failedKeysInRequest);
@@ -1235,79 +1230,61 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     const allProfiles = [];
     const extractedProfileUrls = new Set();
 
-    // Step 1: Scrape post comments and extract profile URLs
-    for (const postUrl of validPostUrls) {
+    // Step 1: Scrape post comments in parallel (round-robin assign keys per post) and extract profile URLs
+    const requiredCommentKeyCount = Math.max(1, validPostUrls.length);
+    const commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, new Set());
+    if (!commentKeys || commentKeys.length === 0) {
+      return res.status(400).json({ error: 'No API keys available', message: 'Please add an Apify API key to start scraping' });
+    }
+    const commentPromises = validPostUrls.map(async (postUrl, idx) => {
+      const apiKey = commentKeys[Math.max(0, idx % Math.max(1, commentKeys.length))];
       try {
         console.log(`🔍 Scraping post comments: ${postUrl}`);
-        
-        // Use the post comments actor: ZI6ykbLlGS3APaPE8
         const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
           method: 'POST',
-          body: {
-            posts: [postUrl]
-          }
+          body: { posts: [postUrl] }
         });
 
-        if (!actorRun.data?.id) {
-          throw new Error('Failed to start actor run');
-        }
-
+        if (!actorRun.data?.id) throw new Error('Failed to start actor run');
         const runId = actorRun.data.id;
-        console.log(`🎬 Post comments actor run started: ${runId}`);
 
         // Poll for completion
         let attempts = 0;
         let runStatus = 'RUNNING';
-        
         while (attempts < 60 && runStatus === 'RUNNING') {
           await new Promise(resolve => setTimeout(resolve, 5000));
           attempts++;
-          
           const statusResponse = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
           runStatus = statusResponse.data?.status;
-          
-          if (runStatus === 'FAILED') {
-            throw new Error('Actor run failed');
-          }
+          if (runStatus === 'FAILED') throw new Error('Actor run failed');
         }
+        if (runStatus !== 'SUCCEEDED') throw new Error(`Actor run timed out or failed: ${runStatus}`);
 
-        if (runStatus !== 'SUCCEEDED') {
-          throw new Error(`Actor run timed out or failed: ${runStatus}`);
-        }
-
-        // Get the dataset ID and fetch comments
+        // Get comments
         const runInfo = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
         const datasetId = runInfo.data?.defaultDatasetId;
-        
-        if (!datasetId) {
-          throw new Error('No dataset ID from actor run');
-        }
-
+        if (!datasetId) throw new Error('No dataset ID from actor run');
         await new Promise(resolve => setTimeout(resolve, 10000));
-
         const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, apiKey.api_key);
         const comments = datasetResponse || [];
 
         if (comments.length > 0) {
-          // Don't store comments in database - just return them for display
-              // Extract profile URL from comment actor
           for (const comment of comments) {
               if (comment.actor && comment.actor.linkedinUrl) {
                 extractedProfileUrls.add(comment.actor.linkedinUrl);
             }
           }
-          
           allComments.push(...comments);
           commentsScraped += comments.length;
         } else {
           commentsFailed++;
         }
-
       } catch (error) {
         console.error(`❌ Failed to scrape post ${postUrl}:`, error.message);
         commentsFailed++;
       }
-    }
+    });
+    await Promise.allSettled(commentPromises);
 
     // Step 2: Use extracted profile URLs (no additional profile URLs needed)
     const allProfileUrls = [...extractedProfileUrls];
@@ -1506,6 +1483,26 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
             return { error: `Failed to save profile data: ${insertError.message}` };
           } else {
             console.log(`✅ Profile scraped and stored: ${profileUrl}`);
+
+            // Per-profile immediate auto-save to user's collection (mixed endpoint)
+            if (saveAllProfiles && newProfile?.id) {
+              try {
+                const { data: existingSaved } = await supabase
+                  .from('user_saved_profiles')
+                  .select('profile_id')
+                  .eq('user_id', req.user.id)
+                  .eq('profile_id', newProfile.id)
+                  .limit(1);
+                if (!existingSaved || existingSaved.length === 0) {
+                  await supabase.from('user_saved_profiles').insert({
+                    user_id: req.user.id,
+                    profile_id: newProfile.id,
+                    tags: []
+                  });
+                }
+              } catch (_) {}
+            }
+
             return { profile: newProfile, fromDb: false };
           }
         } else {
@@ -1533,10 +1530,10 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         const results = batchResult.value;
         results.forEach((result, i) => {
           const url = profileBatches[bIdx][i];
-          if (result.status === 'fulfilled') {
+        if (result.status === 'fulfilled') {
             const { profile, fromDb } = result.value;
-            if (profile) {
-              allProfiles.push(profile);
+          if (profile) {
+            allProfiles.push(profile);
               if (fromDb) profilesFromDb++; else profilesScraped++;
             } else {
               profilesFailed++;
@@ -1546,11 +1543,11 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
             profilesFailed++;
           }
         });
-      } else {
+        } else {
         console.error(`❌ Batch processing failed: batch ${bIdx + 1}`, batchResult.reason);
         profilesFailed += profileBatches[bIdx].length;
-      }
-    });
+        }
+      });
 
     const processingTime = Date.now() - startTime;
 
@@ -1560,7 +1557,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         .from('scraping_logs')
         .update({
           status: profilesFailed === 0 ? 'completed' : 'failed',
-          api_key_used: apiKey.id,
+          api_key_used: (selectedKeys[0]?.id || commentKeys[0]?.id || null),
       profiles_scraped: profilesScraped,
           profiles_failed: profilesFailed,
           completed_at: new Date().toISOString()
@@ -1843,7 +1840,7 @@ app.get('/api/debug/keys', rateLimitMiddleware, authMiddleware, async (req, res)
 app.get('*', (req, res) => {
   const indexPath = 'dist/index.html';
   if (fs.existsSync(indexPath)) {
-    res.sendFile('index.html', { root: 'dist' });
+  res.sendFile('index.html', { root: 'dist' });
   } else {
     res.status(200).send('Backend is running. Frontend build not found.');
   }
