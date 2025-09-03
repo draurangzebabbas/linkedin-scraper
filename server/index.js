@@ -1,4 +1,3 @@
-//Crystal Clear implementation
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -565,9 +564,17 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     // Get Apify keys for scraping - ensure we have at least 5 active keys
     let selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, failedKeysInRequest);
     
+    // Check total active keys available (not just selected ones)
+    const { data: allActiveKeys } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('provider', 'apify')
+      .eq('status', 'active');
+    
     // If we have less than 5 active keys, test all failed/rate_limited keys to reactivate them
-    if (selectedKeys.length < 5) {
-      console.log(`🔧 Less than 5 active keys (${selectedKeys.length}), testing failed/rate_limited keys...`);
+    if (allActiveKeys.length < 5) {
+      console.log(`🔧 Less than 5 active keys (${allActiveKeys.length}), testing failed/rate_limited keys...`);
       
       // Get all non-active keys
       const { data: inactiveKeys } = await supabase
@@ -675,12 +682,12 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         console.log(`🎬 Actor run started: ${runId}`);
 
         // Poll for completion (max 60 attempts ~5 minutes)
-        let attempts = 0;
+        let pollAttempts = 0;
         let runStatus = 'RUNNING';
         
-        while (attempts < 60 && runStatus === 'RUNNING') {
+        while (pollAttempts < 60 && runStatus === 'RUNNING') {
           await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-          attempts++;
+          pollAttempts++;
           
           const statusResponse = await callApifyAPI(`acts/2SyF0bVxmgGr8IVCZ/runs/${runId}`, currentApiKey.api_key);
           runStatus = statusResponse.data?.status;
@@ -1167,12 +1174,12 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
         console.log(`🎬 Actor run started: ${runId}`);
 
         // Poll for completion
-        let attempts = 0;
+        let pollAttempts = 0;
         let runStatus = 'RUNNING';
         
-        while (attempts < 60 && runStatus === 'RUNNING') {
+        while (pollAttempts < 60 && runStatus === 'RUNNING') {
           await new Promise(resolve => setTimeout(resolve, 5000));
-          attempts++;
+          pollAttempts++;
           
           const statusResponse = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
           runStatus = statusResponse.data?.status;
@@ -1353,9 +1360,17 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     const requiredCommentKeyCount = Math.max(1, validPostUrls.length);
     let commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, new Set());
     
+    // Check total active keys available (not just selected ones)
+    const { data: allActiveKeysForComments } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('provider', 'apify')
+      .eq('status', 'active');
+    
     // If we have less than 5 active keys, test all failed/rate_limited keys to reactivate them
-    if (commentKeys.length < 5) {
-      console.log(`🔧 Less than 5 active keys (${commentKeys.length}), testing failed/rate_limited keys...`);
+    if (allActiveKeysForComments.length < 5) {
+      console.log(`🔧 Less than 5 active keys (${allActiveKeysForComments.length}), testing failed/rate_limited keys...`);
       
       // Get all non-active keys
       const { data: inactiveKeys } = await supabase
@@ -1421,11 +1436,11 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         const runId = actorRun.data.id;
 
         // Poll for completion
-        let attempts = 0;
+        let pollAttempts = 0;
         let runStatus = 'RUNNING';
-        while (attempts < 60 && runStatus === 'RUNNING') {
+        while (pollAttempts < 60 && runStatus === 'RUNNING') {
           await new Promise(resolve => setTimeout(resolve, 5000));
-          attempts++;
+          pollAttempts++;
           const statusResponse = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
           runStatus = statusResponse.data?.status;
           if (runStatus === 'FAILED') throw new Error('Actor run failed');
@@ -1499,9 +1514,17 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     // Get Apify keys for scraping - ensure we have at least 5 active keys
     let selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, new Set());
     
+    // Check total active keys available (not just selected ones)
+    const { data: allActiveKeysForProfiles } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('provider', 'apify')
+      .eq('status', 'active');
+    
     // If we have less than 5 active keys, test all failed/rate_limited keys to reactivate them
-    if (selectedKeys.length < 5) {
-      console.log(`🔧 Less than 5 active keys (${selectedKeys.length}), testing failed/rate_limited keys...`);
+    if (allActiveKeysForProfiles.length < 5) {
+      console.log(`🔧 Less than 5 active keys (${allActiveKeysForProfiles.length}), testing failed/rate_limited keys...`);
       
       // Get all non-active keys
       const { data: inactiveKeys } = await supabase
@@ -1597,12 +1620,12 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         const runId = actorRun.data.id;
 
         // Poll for completion
-        let attempts = 0;
+        let pollAttempts = 0;
         let runStatus = 'RUNNING';
         
-        while (attempts < 60 && runStatus === 'RUNNING') {
+        while (pollAttempts < 60 && runStatus === 'RUNNING') {
           await new Promise(resolve => setTimeout(resolve, 5000));
-          attempts++;
+          pollAttempts++;
           
           const statusResponse = await callApifyAPI(`acts/2SyF0bVxmgGr8IVCZ/runs/${runId}`, apiKey.api_key);
           runStatus = statusResponse.data?.status;
