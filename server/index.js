@@ -1,4 +1,4 @@
-//apify key defined error fixed
+//Account level issue solve
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -129,8 +129,10 @@ export const rateLimitMiddleware = async (req, res, next) => {
 // Priority-based initial assignment (active → rate_limited → failed) with runtime replacement system
 
 // Smart key assignment - True Round-Robin with intelligent batch key recovery
+// 🚀 OPTIMIZED FOR MULTI-ACCOUNT STRATEGY: Each key from different Apify accounts ($5/month each)
+// This system automatically rotates between accounts and recovers keys when accounts get new credits
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
-  console.log(`🔍 Smart Key Assignment: Need ${requiredCount} keys for user ${userId}`);
+  console.log(`🔍 Smart Key Assignment: Need ${requiredCount} keys for user ${userId} (Multi-Account Strategy)`);
   
   // Get all keys for this provider
   const { data: allKeys } = await supabase
@@ -145,7 +147,7 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
   }
 
   // 🔄 IMPROVED: Smart cooldown system that allows LRU rotation for potentially refreshed keys
-  const COOLDOWN_MINUTES = 2; // Reduced from 5 to 2 minutes for faster rotation
+  const COOLDOWN_MINUTES = 1; // Reduced to 1 minute for faster rotation with multiple accounts
   const now = new Date();
   
   // Separate keys by priority and filter out keys that failed in current request
@@ -196,7 +198,7 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
   }
 
   // ⚠️ INSUFFICIENT ACTIVE KEYS: Check if we need to test failed keys
-  const MIN_ACTIVE_KEYS_NEEDED = 3; // Only test if we have less than 3 active keys
+  const MIN_ACTIVE_KEYS_NEEDED = 2; // Reduced to 2 for better multi-account utilization
   
   if (activeKeys.length >= MIN_ACTIVE_KEYS_NEEDED) {
     console.log(`✅ SUFFICIENT ACTIVE KEYS: ${activeKeys.length} active >= ${MIN_ACTIVE_KEYS_NEEDED} minimum needed`);
@@ -254,13 +256,13 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
       if (result.success && result.status === 'active') {
         recoveredKeys.push(result.key);
         newlyActive++;
-        console.log(`✅ Key recovered: ${result.keyName} - now ACTIVE`);
+        console.log(`✅ Key recovered: ${result.keyName} - now ACTIVE (from different account)`);
       } else if (result.success && result.status === 'rate_limited') {
         stillRateLimited++;
-        console.log(`⚠️ Key still rate limited: ${result.keyName}`);
+        console.log(`⚠️ Key still rate limited: ${result.keyName} (account may have daily limit)`);
       } else {
         stillFailed++;
-        console.log(`❌ Key still failed: ${result.keyName}${result.error ? ` (${result.error})` : ''}`);
+        console.log(`❌ Key still failed: ${result.keyName}${result.error ? ` (${result.error})` : ''} (account may be exhausted)`);
       }
     }
     
@@ -308,7 +310,7 @@ async function getReplacementKey(supabase, userId, provider, failedKeysInRequest
   }
 
   // 🔄 IMPROVED: Smart filtering that allows LRU rotation for potentially refreshed keys
-  const COOLDOWN_MINUTES = 2; // Same cooldown as main function
+  const COOLDOWN_MINUTES = 1; // Same cooldown as main function for faster rotation
   const now = new Date();
   
   // Separate keys by priority and filter out keys that failed in current request
@@ -422,12 +424,19 @@ async function testAndUpdateApiKey(supabase, key) {
       
     } else {
       // Other error - mark as failed
+      const errorText = await testResponse.text().catch(() => 'Unknown error');
       await supabase.from('api_keys').update({
         status: 'failed',
         last_failed: new Date().toISOString()
       }).eq('id', key.id);
 
-      console.log(`❌ Key ${key.key_name} is FAILED (HTTP ${testResponse.status})`);
+      console.log(`❌ Key ${key.key_name} is FAILED (HTTP ${testResponse.status}): ${errorText}`);
+      
+      // Special handling for account-level limits
+      if (testResponse.status === 402 || errorText.includes('insufficient') || errorText.includes('platform-feature-disabled')) {
+        console.log(`💳 Account limit detected for key ${key.key_name} - will retry after cooldown`);
+      }
+      
       return { success: false, key: { ...key, status: 'failed' } };
     }
     
