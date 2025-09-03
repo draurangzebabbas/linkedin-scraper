@@ -1,3 +1,4 @@
+//Your system will now return actual results instead of just "initiated" messages, with proper database-first processing and crystal clear batch management! 🎉
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -554,12 +555,12 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     const recentlyActivatedKeys = new Set();
     
     // Determine batches and request keys accordingly (round-robin per batch)
-    const BATCH_SIZE = 10; // Changed to 10 for maximum speed as requested
-    const batches = [];
-    for (let i = 0; i < validUrls.length; i += BATCH_SIZE) {
-      batches.push(validUrls.slice(i, i + BATCH_SIZE));
+    const INITIAL_BATCH_SIZE = 10; // Changed to 10 for maximum speed as requested
+    const initialBatches = [];
+    for (let i = 0; i < validUrls.length; i += INITIAL_BATCH_SIZE) {
+      initialBatches.push(validUrls.slice(i, i + INITIAL_BATCH_SIZE));
     }
-    const requiredKeyCount = Math.max(1, batches.length);
+    const requiredKeyCount = Math.max(1, initialBatches.length);
 
     // Get Apify keys for scraping - ensure we have at least 5 active keys
     let selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, failedKeysInRequest);
@@ -642,8 +643,90 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     let profilesScraped = 0;
     let profilesFailed = 0;
 
-    // 🚀 PARALLEL PROFILE SCRAPING - Process all profiles simultaneously
-    console.log(`🚀 Starting parallel scraping of ${validUrls.length} profiles...`);
+        // 🚀 CRYSTAL CLEAR PROFILE PROCESSING - Database First Approach
+    console.log(`🚀 Starting crystal clear processing of ${validUrls.length} profiles...`);
+    
+    // Step 1: Check database first and save to user's collection
+    console.log(`📋 Step 1: Checking database for existing profiles...`);
+    const profilesFromDb = [];
+    const profilesToScrape = [];
+    
+    for (const profileUrl of validUrls) {
+      const { data: existingProfile } = await supabase
+          .from('linkedin_profiles')
+          .select('*')
+          .eq('linkedin_url', profileUrl)
+        .single();
+      
+      if (existingProfile) {
+        console.log(`✅ Profile found in database: ${profileUrl}`);
+        profilesFromDb.push(existingProfile);
+        
+        // Save to user's collection if not already saved
+        const { data: existingSaved } = await supabase
+          .from('user_saved_profiles')
+          .select('profile_id')
+          .eq('user_id', req.user.id)
+          .eq('profile_id', existingProfile.id)
+          .limit(1);
+
+        if (!existingSaved || existingSaved.length === 0) {
+          await supabase.from('user_saved_profiles').insert({
+            user_id: req.user.id,
+            profile_id: existingProfile.id,
+            tags: []
+          });
+          console.log(`💾 Saved existing profile to user collection: ${profileUrl}`);
+        }
+      } else {
+        console.log(`🔄 Profile not in database, will scrape: ${profileUrl}`);
+        profilesToScrape.push(profileUrl);
+      }
+    }
+    
+    console.log(`📊 Database check complete: ${profilesFromDb.length} found, ${profilesToScrape.length} to scrape`);
+    
+    // Step 2: Process profiles that need scraping
+    if (profilesToScrape.length === 0) {
+      console.log(`✅ All profiles found in database! No scraping needed.`);
+      const response = {
+        success: true,
+        status: 'completed',
+        message: `All ${profilesFromDb.length} profiles found in database!`,
+        profiles: profilesFromDb,
+        total_profiles_processed: validUrls.length,
+        profiles_from_db: profilesFromDb.length,
+        profiles_scraped: 0,
+        profiles_failed: 0,
+        processing_time_ms: Date.now() - startTime
+      };
+      
+      if (logId) {
+        await supabase
+          .from('scraping_logs')
+          .update({
+            status: 'completed',
+            profiles_scraped: 0,
+            profiles_failed: 0,
+            completed_at: new Date().toISOString()
+          })
+          .eq('id', logId);
+      }
+      
+      return res.json(response);
+    }
+    
+    // Step 3: Create batches for profiles to scrape
+    const SCRAPING_BATCH_SIZE = 10; // Crystal clear batch size
+    const scrapingBatches = [];
+    for (let i = 0; i < profilesToScrape.length; i += SCRAPING_BATCH_SIZE) {
+      scrapingBatches.push(profilesToScrape.slice(i, i + SCRAPING_BATCH_SIZE));
+    }
+    
+    console.log(`📦 Created ${scrapingBatches.length} batches of up to ${SCRAPING_BATCH_SIZE} profiles each`);
+    
+    // Step 4: Process batches in parallel with round-robin key assignment
+    console.log(`🚀 Starting parallel batch processing...`);
     
     // Helper function to process a single profile with an assigned key
     const processProfile = async (profileUrl, initialKey) => {
@@ -655,18 +738,6 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       while (attempts < maxAttempts) {
         try {
           console.log(`🔍 Scraping profile: ${profileUrl} (attempt ${attempts + 1}/${maxAttempts}) with key: ${currentApiKey.key_name}`);
-        
-        // First, check if profile already exists in global table
-        const { data: existingProfiles } = await supabase
-          .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-          .limit(1);
-
-        if (existingProfiles && existingProfiles.length > 0) {
-          console.log(`📋 Profile already exists: ${profileUrl}`);
-          return { profile: existingProfiles[0], fromDb: true };
-        }
         
         // Start the LinkedIn profile scraper actor
           const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', currentApiKey.api_key, {
@@ -913,9 +984,10 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       return { error: 'All key attempts failed' };
     };
 
-    // Process ALL batches in parallel, each batch assigned a key via round-robin
-    const batchPromises = batches.map((batch, batchIndex) => {
+        // Process ALL batches in parallel, each batch assigned a key via round-robin
+    const batchPromises = scrapingBatches.map((batch, batchIndex) => {
       const assignedKey = selectedKeys[Math.max(0, batchIndex % Math.max(1, selectedKeys.length))];
+      console.log(`🔄 Batch ${batchIndex + 1}/${scrapingBatches.length} assigned key: ${assignedKey.key_name}`);
       return Promise.allSettled(batch.map(url => processProfile(url, assignedKey)));
     });
 
@@ -926,31 +998,36 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       if (batchResult.status === 'fulfilled') {
         const results = batchResult.value;
         results.forEach((result, i) => {
-          const url = batches[bIdx][i];
-      if (result.status === 'fulfilled') {
+          const url = scrapingBatches[bIdx][i];
+          if (result.status === 'fulfilled') {
             const { profile } = result.value;
-        if (profile) {
-          scrapedProfiles.push(profile);
-        profilesScraped++;
-        } else {
-          profilesFailed++;
-        }
-      } else {
+            if (profile) {
+              scrapedProfiles.push(profile);
+              profilesScraped++;
+            } else {
+              profilesFailed++;
+            }
+          } else {
             console.error(`❌ Profile processing failed: ${url}`, result.reason);
-        profilesFailed++;
+            profilesFailed++;
           }
         });
       } else {
         // Entire batch failed (unlikely), count all in batch as failed
         console.error(`❌ Batch processing failed: batch ${bIdx + 1}`, batchResult.reason);
-        profilesFailed += batches[bIdx].length;
+        profilesFailed += scrapingBatches[bIdx].length;
       }
     });
+    
+    // Combine all profiles (from DB + scraped)
+    const allProfiles = [...profilesFromDb, ...scrapedProfiles];
+    
+    console.log(`📊 Final results: ${allProfiles.length} total profiles (${profilesFromDb.length} from DB, ${profilesScraped} scraped), ${profilesFailed} failed`);
 
         // Update key usage
         // Mark all used keys as used
         const usedKeyIds = new Set(
-          batches.map((_, idx) => {
+          scrapingBatches.map((_, idx) => {
             const k = selectedKeys[Math.max(0, idx % Math.max(1, selectedKeys.length))];
             return k?.id;
           }).filter(Boolean)
@@ -1026,28 +1103,32 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
 
     // Create response - ALWAYS return results to user
     const response = {
+      success: true,
       request_id: requestId,
       profile_urls: validUrls,
+      profiles: allProfiles,
+      total_profiles_processed: validUrls.length,
+      profiles_from_db: profilesFromDb.length,
       profiles_scraped: profilesScraped,
       profiles_failed: profilesFailed,
-      processing_time: processingTime,
+      processing_time_ms: processingTime,
       api_keys_used: apiKeysUsed,
-      profiles: scrapedProfiles,
-      status: profilesFailed === 0 ? 'completed' : (scrapedProfiles.length > 0 ? 'partial' : 'failed'),
-      auto_saved: saveAllProfiles ? scrapedProfiles.length : 0,
+      status: profilesFailed === 0 ? 'completed' : (allProfiles.length > 0 ? 'partial_success' : 'failed'),
+      auto_saved: saveAllProfiles ? allProfiles.length : 0,
       message: profilesFailed > 0 ? 
-        `Some profiles failed to scrape. ${scrapedProfiles.length} profiles scraped successfully, ${profilesFailed} failed.` : 
-        `All profiles scraped successfully! ${scrapedProfiles.length} profiles processed.`
+        `Processing complete! ${allProfiles.length} profiles processed (${profilesFromDb.length} from DB, ${profilesScraped} scraped), ${profilesFailed} failed.` : 
+        `All profiles processed successfully! ${allProfiles.length} profiles (${profilesFromDb.length} from DB, ${profilesScraped} scraped).`
     };
 
     console.log(`🎉 LinkedIn scraping completed!`);
     console.log(`📊 Final stats:`, {
       request_id: requestId,
       processing_time: processingTime,
+      total_profiles: allProfiles.length,
+      profiles_from_db: profilesFromDb.length,
       profiles_scraped: profilesScraped,
       profiles_failed: profilesFailed
     });
-    console.log(`📊 Results: ${scrapedProfiles.length} profiles scraped, ${profilesFailed} failed`);
 
     res.json(response);
 
@@ -1264,16 +1345,17 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
 
     // Create response - ALWAYS return results to user
     const response = {
+      success: true,
       request_id: requestId,
       post_urls: validUrls,
       comments_scraped: commentsScraped,
       comments_failed: commentsFailed,
-      processing_time: processingTime,
+      processing_time_ms: processingTime,
       comments: allComments,
-      status: commentsFailed === 0 ? 'completed' : (commentsScraped > 0 ? 'partial' : 'failed'),
+      status: commentsFailed === 0 ? 'completed' : (commentsScraped > 0 ? 'partial_success' : 'failed'),
       message: commentsFailed > 0 ? 
-        `Some posts failed to scrape. ${commentsScraped} comments scraped successfully, ${commentsFailed} posts failed.` : 
-        'All comments scraped successfully!'
+        `Post comments scraping complete! ${commentsScraped} comments scraped successfully, ${commentsFailed} posts failed.` : 
+        `All comments scraped successfully! ${commentsScraped} comments processed.`
     };
 
     console.log(`🎉 Post comment scraping completed!`);
@@ -1468,7 +1550,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
           commentsFailed++;
             break; // No comments found, exit retry loop
         }
-              } catch (error) {
+      } catch (error) {
           console.error(`❌ Failed to scrape post ${postUrl} with key ${apiKey.key_name}:`, error.message);
           
           // Check if this is an account limit error - mark key as failed immediately
@@ -1493,9 +1575,9 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
             console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
           } else {
             console.log(`❌ All attempts failed for post ${postUrl}`);
-            commentsFailed++;
-          }
-        }
+        commentsFailed++;
+      }
+    }
       }
     });
     await Promise.allSettled(commentPromises);
@@ -1930,19 +2012,23 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
 
     // Create response - ALWAYS return results to user
     const response = {
+      success: true,
       request_id: requestId,
       post_urls: validPostUrls,
+      comments_scraped: commentsScraped,
+      comments_failed: commentsFailed,
       total_profiles_processed: allProfileUrls.length,
       profiles_from_database: profilesFromDb,
       profiles_scraped: profilesScraped,
       profiles_failed: profilesFailed,
-      processing_time: processingTime,
+      processing_time_ms: processingTime,
       profiles: allProfiles,
-      status: profilesFailed === 0 ? 'completed' : (allProfiles.length > 0 ? 'partial' : 'failed'),
+      comments: allComments,
+      status: profilesFailed === 0 ? 'completed' : (allProfiles.length > 0 ? 'partial_success' : 'failed'),
       auto_saved: saveAllProfiles ? allProfiles.length : 0,
       message: profilesFailed > 0 ? 
-        `Some profiles failed to scrape. ${allProfiles.length} profiles processed successfully (${profilesFromDb} from DB, ${profilesScraped} scraped), ${profilesFailed} failed.` : 
-        `All profiles processed successfully! ${allProfiles.length} profiles (${profilesFromDb} from DB, ${profilesScraped} scraped)`
+        `Mixed scraping complete! ${commentsScraped} comments scraped, ${allProfiles.length} profiles processed (${profilesFromDb} from DB, ${profilesScraped} scraped), ${profilesFailed} profiles failed.` : 
+        `Mixed scraping successful! ${commentsScraped} comments scraped, ${allProfiles.length} profiles processed (${profilesFromDb} from DB, ${profilesScraped} scraped).`
     };
 
     console.log(`🎉 Mixed scraping completed! Profiles: ${allProfiles.length} (${profilesFromDb} from DB, ${profilesScraped} scraped)`);
