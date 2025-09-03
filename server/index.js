@@ -1,4 +1,4 @@
-//saveAllProfiles Added
+//Url Cleaning Fix Linter errors
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -42,7 +42,39 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 // Serve static files from the React app build
-app.use(express.static('dist'));
+// Serve frontend if build exists; otherwise provide a simple root response
+import fs from 'fs';
+if (fs.existsSync('dist')) {
+  app.use(express.static('dist'));
+} else {
+  app.get('/', (req, res) => {
+    res.send('Backend is running. Build the frontend to serve static files.');
+  });
+}
+
+// Normalize LinkedIn URLs by removing query params, fragments, trimming, and removing trailing slashes
+function normalizeLinkedInUrl(rawUrl) {
+  try {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    const trimmed = rawUrl.trim();
+    // Ensure we have a protocol for URL parsing
+    const candidate = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
+    const url = new URL(candidate);
+    // Only accept linkedin hostnames
+    if (!url.hostname.includes('linkedin.com')) return '';
+    // Drop search params and hash
+    url.search = '';
+    url.hash = '';
+    // Remove trailing slash from pathname unless root
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    // Return without trailing slash and without default port
+    return `${url.protocol}//${url.hostname}${url.pathname}`;
+  } catch {
+    // Fallback: strip everything after ? or # if URL constructor fails
+    const base = String(rawUrl || '').trim();
+    return base.split('#')[0].split('?')[0].replace(/\/+$/, '');
+  }
+}
 
 // Initialize Supabase (prefer Service Role key on the server)
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -477,7 +509,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
 
     // Validate and sanitize profile URLs
     const validUrls = profileUrls
-      .map(url => url.trim())
+      .map(u => normalizeLinkedInUrl(u))
       .filter(url => url && url.includes('linkedin.com/in/'))
       .slice(0, 10); // Limit to 10 profiles per request
 
@@ -493,7 +525,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       const { data: logRow } = await supabase
         .from('scraping_logs')
         .insert({
-          user_id: req.user.id,
+        user_id: req.user.id,
           scraping_type: 'profile-details',
           input_urls: validUrls,
           status: 'running',
@@ -523,8 +555,8 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         await supabase
           .from('scraping_logs')
           .update({
-            status: 'failed',
-            error_message: 'No Apify API keys available (all keys are inactive)',
+        status: 'failed',
+        error_message: 'No Apify API keys available (all keys are inactive)',
             completed_at: new Date().toISOString()
           })
           .eq('id', logId);
@@ -787,7 +819,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
         .update({
           status: profilesFailed === 0 ? 'completed' : 'failed',
           api_key_used: apiKey.id,
-          profiles_scraped: profilesScraped,
+      profiles_scraped: profilesScraped,
           profiles_failed: profilesFailed,
           completed_at: new Date().toISOString()
         })
@@ -871,8 +903,8 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       await supabase
         .from('scraping_logs')
         .update({
-          status: 'failed',
-          error_message: error.message,
+      status: 'failed',
+      error_message: error.message,
           completed_at: new Date().toISOString()
         })
         .eq('id', logId);
@@ -904,7 +936,7 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
 
     // Validate and sanitize post URLs
     const validUrls = postUrls
-      .map(url => url.trim())
+      .map(u => normalizeLinkedInUrl(u))
       .filter(url => url && url.includes('linkedin.com/posts/'))
       .slice(0, 10); // Limit to 10 posts per request
 
@@ -920,7 +952,7 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
       const { data: logRow } = await supabase
         .from('scraping_logs')
         .insert({
-          user_id: req.user.id,
+        user_id: req.user.id,
           scraping_type: 'post-comments',
           input_urls: validUrls,
           status: 'running',
@@ -1055,8 +1087,8 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
       await supabase
         .from('scraping_logs')
         .update({
-          status: 'failed',
-          error_message: error.message,
+      status: 'failed',
+      error_message: error.message,
           completed_at: new Date().toISOString()
         })
         .eq('id', logId);
@@ -1074,6 +1106,7 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
 // Mixed scraping endpoint (post URLs → commenter profiles with parallel processing)
 app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, res) => {
   const startTime = Date.now();
+  const requestId = `mix_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
   let logId = null;
   
   try {
@@ -1082,7 +1115,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     // Validate post URLs
     const validPostUrls = postUrls && Array.isArray(postUrls) 
       ? postUrls
-          .map(url => url.trim())
+          .map(u => normalizeLinkedInUrl(u))
           .filter(url => url && url.includes('linkedin.com/posts/'))
           .slice(0, 10)
       : [];
@@ -1099,7 +1132,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       const { data: logRow } = await supabase
         .from('scraping_logs')
         .insert({
-          user_id: req.user.id,
+        user_id: req.user.id,
           scraping_type: 'mixed',
           input_urls: validPostUrls,
           status: 'running',
@@ -1446,7 +1479,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         .update({
           status: profilesFailed === 0 ? 'completed' : 'failed',
           api_key_used: apiKey.id,
-          profiles_scraped: profilesScraped,
+      profiles_scraped: profilesScraped,
           profiles_failed: profilesFailed,
           completed_at: new Date().toISOString()
         })
@@ -1523,8 +1556,8 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       await supabase
         .from('scraping_logs')
         .update({
-          status: 'failed',
-          error_message: error.message,
+      status: 'failed',
+      error_message: error.message,
           completed_at: new Date().toISOString()
         })
         .eq('id', logId);
