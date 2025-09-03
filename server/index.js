@@ -1,4 +1,4 @@
-//Account level issue solve
+//FIXED: System Now Always Returns Results to User
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -581,7 +581,11 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
 
       return res.status(400).json({ 
         error: 'No API keys', 
-        message: 'All your Apify API keys have hit their daily rate limits. Please add credits to your Apify accounts or wait for daily reset.' 
+        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
+        status: 'failed',
+        profiles: [],
+        profiles_scraped: 0,
+        profiles_failed: validUrls.length
       });
     }
 
@@ -948,7 +952,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       }
     }
 
-    // Create response
+    // Create response - ALWAYS return results to user
     const response = {
       request_id: requestId,
       profile_urls: validUrls,
@@ -957,8 +961,11 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       processing_time: processingTime,
       api_keys_used: apiKeysUsed,
       profiles: scrapedProfiles,
-      status: profilesFailed === 0 ? 'completed' : 'partial',
-      auto_saved: saveAllProfiles ? scrapedProfiles.length : 0
+      status: profilesFailed === 0 ? 'completed' : (scrapedProfiles.length > 0 ? 'partial' : 'failed'),
+      auto_saved: saveAllProfiles ? scrapedProfiles.length : 0,
+      message: profilesFailed > 0 ? 
+        `Some profiles failed to scrape. ${scrapedProfiles.length} profiles scraped successfully, ${profilesFailed} failed.` : 
+        `All profiles scraped successfully! ${scrapedProfiles.length} profiles processed.`
     };
 
     console.log(`🎉 LinkedIn scraping completed!`);
@@ -968,6 +975,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       profiles_scraped: profilesScraped,
       profiles_failed: profilesFailed
     });
+    console.log(`📊 Results: ${scrapedProfiles.length} profiles scraped, ${profilesFailed} failed`);
 
     res.json(response);
 
@@ -1054,7 +1062,11 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
     if (!selectedKeys || selectedKeys.length === 0) {
       return res.status(400).json({ 
         error: 'No API keys available', 
-        message: 'Please add an Apify API key to start scraping' 
+        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
+        status: 'failed',
+        comments: [],
+        comments_scraped: 0,
+        comments_failed: validUrls.length
       });
     }
 
@@ -1128,6 +1140,19 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
 
       } catch (error) {
         console.error(`❌ Failed to scrape post ${postUrl}:`, error.message);
+        
+        // Check if this is an account limit error
+        if (error.message.includes('Monthly usage hard limit exceeded') || 
+            error.message.includes('platform-feature-disabled') ||
+            error.message.includes('Insufficient credits')) {
+          console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
+          // Mark this key as failed in the database
+          await supabase.from('api_keys').update({
+            status: 'failed',
+            last_failed: new Date().toISOString()
+          }).eq('id', apiKey.id);
+        }
+        
         commentsFailed++;
       }
     });
@@ -1149,7 +1174,7 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
         .eq('id', logId);
     }
 
-    // Create response
+    // Create response - ALWAYS return results to user
     const response = {
       request_id: requestId,
       post_urls: validUrls,
@@ -1157,10 +1182,14 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
       comments_failed: commentsFailed,
       processing_time: processingTime,
       comments: allComments,
-      status: commentsFailed === 0 ? 'completed' : 'partial'
+      status: commentsFailed === 0 ? 'completed' : (commentsScraped > 0 ? 'partial' : 'failed'),
+      message: commentsFailed > 0 ? 
+        `Some posts failed to scrape. ${commentsScraped} comments scraped successfully, ${commentsFailed} posts failed.` : 
+        'All comments scraped successfully!'
     };
 
     console.log(`🎉 Post comment scraping completed!`);
+    console.log(`📊 Results: ${commentsScraped} comments scraped, ${commentsFailed} posts failed`);
     res.json(response);
 
   } catch (error) {
@@ -1243,7 +1272,15 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     const requiredCommentKeyCount = Math.max(1, validPostUrls.length);
     const commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, new Set());
     if (!commentKeys || commentKeys.length === 0) {
-      return res.status(400).json({ error: 'No API keys available', message: 'Please add an Apify API key to start scraping' });
+      return res.status(400).json({ 
+        error: 'No API keys available', 
+        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
+        status: 'failed',
+        profiles: [],
+        total_profiles_processed: 0,
+        profiles_scraped: 0,
+        profiles_failed: 0
+      });
     }
     const commentPromises = validPostUrls.map(async (postUrl, idx) => {
       const apiKey = commentKeys[Math.max(0, idx % Math.max(1, commentKeys.length))];
@@ -1290,6 +1327,19 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         }
       } catch (error) {
         console.error(`❌ Failed to scrape post ${postUrl}:`, error.message);
+        
+        // Check if this is an account limit error
+        if (error.message.includes('Monthly usage hard limit exceeded') || 
+            error.message.includes('platform-feature-disabled') ||
+            error.message.includes('Insufficient credits')) {
+          console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
+          // Mark this key as failed in the database
+          await supabase.from('api_keys').update({
+            status: 'failed',
+            last_failed: new Date().toISOString()
+          }).eq('id', apiKey.id);
+        }
+        
         commentsFailed++;
       }
     });
@@ -1312,7 +1362,12 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     if (!selectedKeys || selectedKeys.length === 0) {
       return res.status(400).json({ 
         error: 'No API keys available', 
-        message: 'Please add an Apify API key to start scraping' 
+        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
+        status: 'failed',
+        profiles: [],
+        total_profiles_processed: allProfileUrls.length,
+        profiles_scraped: 0,
+        profiles_failed: allProfileUrls.length
       });
     }
 
@@ -1618,7 +1673,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       }
     }
 
-    // Create response - ONLY profile details, no comments
+    // Create response - ALWAYS return results to user
     const response = {
       request_id: requestId,
       post_urls: validPostUrls,
@@ -1628,11 +1683,15 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       profiles_failed: profilesFailed,
       processing_time: processingTime,
       profiles: allProfiles,
-      status: profilesFailed === 0 ? 'completed' : 'partial',
-      auto_saved: saveAllProfiles ? allProfiles.length : 0
+      status: profilesFailed === 0 ? 'completed' : (allProfiles.length > 0 ? 'partial' : 'failed'),
+      auto_saved: saveAllProfiles ? allProfiles.length : 0,
+      message: profilesFailed > 0 ? 
+        `Some profiles failed to scrape. ${allProfiles.length} profiles processed successfully (${profilesFromDb} from DB, ${profilesScraped} scraped), ${profilesFailed} failed.` : 
+        `All profiles processed successfully! ${allProfiles.length} profiles (${profilesFromDb} from DB, ${profilesScraped} scraped)`
     };
 
     console.log(`🎉 Mixed scraping completed! Profiles: ${allProfiles.length} (${profilesFromDb} from DB, ${profilesScraped} scraped)`);
+    console.log(`📊 Results: ${allProfiles.length} profiles processed, ${profilesFailed} failed`);
     res.json(response);
 
   } catch (error) {
