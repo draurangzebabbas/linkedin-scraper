@@ -1,4 +1,4 @@
-//Implemented true round-robin key assignment per batch and per profile stored in database
+//Moved batch construction and key assignment to after allProfileUrls is computed.
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -1226,26 +1226,6 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       console.warn('⚠️ Failed to log request to database:', dbError.message);
     }
 
-    // Determine profile batches and request keys accordingly (round-robin per batch)
-    const BATCH_SIZE = 50;
-    const profileBatches = [];
-    for (let i = 0; i < allProfileUrls.length; i += BATCH_SIZE) {
-      profileBatches.push(allProfileUrls.slice(i, i + BATCH_SIZE));
-    }
-    const requiredKeyCount = Math.max(1, profileBatches.length);
-
-    // Get Apify keys for scraping (round-robin across profile batches)
-    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, new Set());
-    
-    if (!selectedKeys || selectedKeys.length === 0) {
-      return res.status(400).json({ 
-        error: 'No API keys available', 
-        message: 'Please add an Apify API key to start scraping' 
-      });
-    }
-
-    console.log(`🔑 Using ${selectedKeys.length} keys for profiles (round-robin)`);
-
     let commentsScraped = 0;
     let commentsFailed = 0;
     let profilesScraped = 0;
@@ -1332,11 +1312,32 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     // Step 2: Use extracted profile URLs (no additional profile URLs needed)
     const allProfileUrls = [...extractedProfileUrls];
 
+    // Determine profile batches and request keys accordingly (round-robin per batch)
+    const BATCH_SIZE = 50;
+    const profileBatches = [];
+    for (let i = 0; i < allProfileUrls.length; i += BATCH_SIZE) {
+      profileBatches.push(allProfileUrls.slice(i, i + BATCH_SIZE));
+    }
+    const requiredKeyCount = Math.max(1, profileBatches.length);
+
+    // Get Apify keys for scraping (round-robin across profile batches)
+    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, new Set());
+    
+    if (!selectedKeys || selectedKeys.length === 0) {
+      return res.status(400).json({ 
+        error: 'No API keys available', 
+        message: 'Please add an Apify API key to start scraping' 
+      });
+    }
+
+    console.log(`🔑 Using ${selectedKeys.length} keys for profiles (round-robin)`);
+
     // Step 3: PARALLEL profile processing - check database first, then scrape in batches
     console.log(`🚀 Starting parallel processing of ${allProfileUrls.length} profiles...`);
     
-    // Helper function to process a single profile
-    const processProfile = async (profileUrl) => {
+    // Helper function to process a single profile (with a batch-assigned key)
+    const processProfile = async (profileUrl, assignedKey) => {
+      let apiKey = assignedKey;
       try {
         // First, check if profile exists in our database
         const { data: existingProfile, error: dbError } = await supabase
@@ -1521,7 +1522,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     console.log(`📦 Processing ${profileBatches.length} batches of up to ${BATCH_SIZE} profiles each...`);
     const batchPromises = profileBatches.map((batch, batchIndex) => {
       const assignedKey = selectedKeys[Math.max(0, batchIndex % Math.max(1, selectedKeys.length))];
-      return Promise.allSettled(batch.map(url => processProfile(url)));
+      return Promise.allSettled(batch.map(url => processProfile(url, assignedKey)));
     });
 
     const batchResults = await Promise.allSettled(batchPromises);
