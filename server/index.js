@@ -1,4 +1,4 @@
-//formating fixed
+//saveAllProfiles Added
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -460,13 +460,13 @@ async function callApifyAPI(endpoint, apiKey, options = {}) {
 // Main LinkedIn scraping endpoint
 app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req, res) => {
   const startTime = Date.now();
-  const requestId = uuidv4();
+  let logId = null;
   
   // Track keys that failed during this request to prevent reuse
   const failedKeysInRequest = new Set();
   
   try {
-    const { profileUrls } = req.body;
+    const { profileUrls, saveAllProfiles = false } = req.body;
     
     if (!profileUrls || !Array.isArray(profileUrls) || profileUrls.length === 0) {
       return res.status(400).json({ 
@@ -488,14 +488,20 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       });
     }
 
-    // Log the request
+    // Log the request (aligned with schema)
     try {
-      await supabase.from('scraping_logs').insert({
-        user_id: req.user.id,
-        request_id: requestId,
-        profile_urls: validUrls,
-        status: 'pending'
-      });
+      const { data: logRow } = await supabase
+        .from('scraping_logs')
+        .insert({
+          user_id: req.user.id,
+          scraping_type: 'profile-details',
+          input_urls: validUrls,
+          status: 'running',
+          started_at: new Date().toISOString()
+        })
+        .select('id')
+        .single();
+      logId = logRow?.id || null;
     } catch (dbError) {
       console.warn('⚠️ Failed to log request to database:', dbError.message);
       // Continue with scraping even if logging fails
@@ -513,11 +519,16 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     if (!selectedKeys || selectedKeys.length === 0) {
       console.log(`❌ No API keys available for user ${req.user.id}`);
       
-      await supabase.from('scraping_logs').update({
-        status: 'failed',
-        error_message: 'No Apify API keys available (all keys are inactive)',
-        processing_time: Date.now() - startTime
-      }).eq('request_id', requestId);
+      if (logId) {
+        await supabase
+          .from('scraping_logs')
+          .update({
+            status: 'failed',
+            error_message: 'No Apify API keys available (all keys are inactive)',
+            completed_at: new Date().toISOString()
+          })
+          .eq('id', logId);
+      }
 
       return res.status(400).json({ 
         error: 'No API keys', 
@@ -673,7 +684,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
             company_industry: safeString(profileData.companyIndustry),
             company_website: safeString(profileData.companyWebsite),
             company_linkedin: safeString(profileData.companyLinkedin),
-            company_founded_in: safeInteger(profileData.companyFoundedIn),
+            company_founded_in: safeNumber(profileData.companyFoundedIn),
             company_size: safeString(profileData.companySize),
             current_job_duration: safeString(profileData.currentJobDuration),
             current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
@@ -724,7 +735,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
             headline: safeString(profileData.headline),
             connections: safeInteger(profileData.connections),
             followers: safeInteger(profileData.followers),
-            company_founded_in: safeInteger(profileData.companyFoundedIn),
+            company_founded_in: safeNumber(profileData.companyFoundedIn),
             current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
             open_connection: safeBoolean(profileData.openConnection)
           });
@@ -770,14 +781,62 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     const processingTime = Date.now() - startTime;
 
     // Update the log with results
-    await supabase.from('scraping_logs').update({
-      status: profilesFailed === 0 ? 'completed' : 'partial',
-      results: { profiles: scrapedProfiles },
-      api_keys_used: [apiKey.id],
-      processing_time: processingTime,
-      profiles_scraped: profilesScraped,
-      profiles_failed: profilesFailed
-    }).eq('request_id', requestId);
+    if (logId) {
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: profilesFailed === 0 ? 'completed' : 'failed',
+          api_key_used: apiKey.id,
+          profiles_scraped: profilesScraped,
+          profiles_failed: profilesFailed,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', logId);
+    }
+
+    // Auto-save profiles if requested
+    if (saveAllProfiles && scrapedProfiles.length > 0) {
+      try {
+        console.log(`💾 Auto-saving ${scrapedProfiles.length} profiles...`);
+        
+        // Check which profiles are already saved
+        const { data: existingSaved, error: checkError } = await supabase
+          .from('user_saved_profiles')
+          .select('profile_id')
+          .eq('user_id', req.user.id)
+          .in('profile_id', scrapedProfiles.map(p => p.id));
+
+        if (checkError) {
+          console.error('Error checking existing saved profiles:', checkError);
+        } else {
+          const existingProfileIds = new Set(existingSaved?.map(p => p.profile_id) || []);
+          const newProfilesToSave = scrapedProfiles.filter(p => !existingProfileIds.has(p.id));
+
+          if (newProfilesToSave.length > 0) {
+            const { error: saveError } = await supabase
+              .from('user_saved_profiles')
+              .insert(
+                newProfilesToSave.map(profile => ({
+                  user_id: req.user.id,
+                  profile_id: profile.id,
+                  tags: []
+                }))
+              );
+
+            if (saveError) {
+              console.error('Error auto-saving profiles:', saveError);
+            } else {
+              console.log(`✅ Auto-saved ${newProfilesToSave.length} profiles successfully!`);
+            }
+          } else {
+            console.log(`ℹ️ All profiles were already saved`);
+          }
+        }
+      } catch (autoSaveError) {
+        console.error('Error in auto-save process:', autoSaveError);
+        // Don't fail the request if auto-save fails
+      }
+    }
 
     // Create response
     const response = {
@@ -788,7 +847,8 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
       processing_time: processingTime,
       api_keys_used: 1,
       profiles: scrapedProfiles,
-      status: profilesFailed === 0 ? 'completed' : 'partial'
+      status: profilesFailed === 0 ? 'completed' : 'partial',
+      auto_saved: saveAllProfiles ? scrapedProfiles.length : 0
     };
 
     console.log(`🎉 LinkedIn scraping completed!`);
@@ -807,11 +867,16 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     const processingTime = Date.now() - startTime;
     
     // Update log with error
-    await supabase.from('scraping_logs').update({
-      status: 'failed',
-      error_message: error.message,
-      processing_time: processingTime
-    }).eq('request_id', requestId);
+    if (logId) {
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: 'failed',
+          error_message: error.message,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', logId);
+    }
 
     res.status(500).json({ 
       error: 'LinkedIn scraping failed', 
@@ -825,7 +890,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
 // Post comment scraping endpoint
 app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async (req, res) => {
   const startTime = Date.now();
-  const requestId = uuidv4();
+  let logId = null;
   
   try {
     const { postUrls, scrapingType } = req.body;
@@ -850,14 +915,20 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
       });
     }
 
-    // Log the request
+    // Log the request (aligned with schema)
     try {
-      await supabase.from('scraping_logs').insert({
-        user_id: req.user.id,
-        request_id: requestId,
-        profile_urls: validUrls,
-        status: 'pending'
-      });
+      const { data: logRow } = await supabase
+        .from('scraping_logs')
+        .insert({
+          user_id: req.user.id,
+          scraping_type: 'post-comments',
+          input_urls: validUrls,
+          status: 'running',
+          started_at: new Date().toISOString()
+        })
+        .select('id')
+        .single();
+      logId = logRow?.id || null;
     } catch (dbError) {
       console.warn('⚠️ Failed to log request to database:', dbError.message);
     }
@@ -949,13 +1020,17 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
     const processingTime = Date.now() - startTime;
 
     // Update log with results
-    await supabase.from('scraping_logs').update({
-      status: 'completed',
-      results: { comments: allComments },
-      processing_time: processingTime,
-      profiles_scraped: commentsScraped,
-      profiles_failed: commentsFailed
-    }).eq('request_id', requestId);
+    if (logId) {
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: commentsFailed === 0 ? 'completed' : 'failed',
+          comments_scraped: commentsScraped,
+          comments_failed: commentsFailed,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', logId);
+    }
 
     // Create response
     const response = {
@@ -976,11 +1051,16 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
     
     const processingTime = Date.now() - startTime;
     
-    await supabase.from('scraping_logs').update({
-      status: 'failed',
-      error_message: error.message,
-      processing_time: processingTime
-    }).eq('request_id', requestId);
+    if (logId) {
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: 'failed',
+          error_message: error.message,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', logId);
+    }
 
     res.status(500).json({ 
       error: 'Post comment scraping failed', 
@@ -994,10 +1074,10 @@ app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async
 // Mixed scraping endpoint (post URLs → commenter profiles with parallel processing)
 app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, res) => {
   const startTime = Date.now();
-  const requestId = uuidv4();
+  let logId = null;
   
   try {
-    const { postUrls } = req.body;
+    const { postUrls, saveAllProfiles = false } = req.body;
     
     // Validate post URLs
     const validPostUrls = postUrls && Array.isArray(postUrls) 
@@ -1014,14 +1094,20 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       });
     }
 
-    // Log the request
+    // Log the request (aligned with schema)
     try {
-      await supabase.from('scraping_logs').insert({
-        user_id: req.user.id,
-        request_id: requestId,
-        profile_urls: validPostUrls,
-        status: 'pending'
-      });
+      const { data: logRow } = await supabase
+        .from('scraping_logs')
+        .insert({
+          user_id: req.user.id,
+          scraping_type: 'mixed',
+          input_urls: validPostUrls,
+          status: 'running',
+          started_at: new Date().toISOString()
+        })
+        .select('id')
+        .single();
+      logId = logRow?.id || null;
     } catch (dbError) {
       console.warn('⚠️ Failed to log request to database:', dbError.message);
     }
@@ -1240,7 +1326,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
               company_industry: safeString(profileData.companyIndustry),
               company_website: safeString(profileData.companyWebsite),
               company_linkedin: safeString(profileData.companyLinkedin),
-              company_founded_in: safeInteger(profileData.companyFoundedIn),
+              company_founded_in: safeNumber(profileData.companyFoundedIn),
               company_size: safeString(profileData.companySize),
               current_job_duration: safeString(profileData.currentJobDuration),
               current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
@@ -1291,7 +1377,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
               headline: safeString(profileData.headline),
               connections: safeInteger(profileData.connections),
               followers: safeInteger(profileData.followers),
-              company_founded_in: safeInteger(profileData.companyFoundedIn),
+              company_founded_in: safeNumber(profileData.companyFoundedIn),
               current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
               open_connection: safeBoolean(profileData.openConnection)
             });
@@ -1354,13 +1440,62 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     const processingTime = Date.now() - startTime;
 
     // Update log with results
-    await supabase.from('scraping_logs').update({
-      status: 'completed',
-      results: { profiles: allProfiles },
-      processing_time: processingTime,
-      profiles_scraped: profilesScraped,
-      profiles_failed: profilesFailed
-    }).eq('request_id', requestId);
+    if (logId) {
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: profilesFailed === 0 ? 'completed' : 'failed',
+          api_key_used: apiKey.id,
+          profiles_scraped: profilesScraped,
+          profiles_failed: profilesFailed,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', logId);
+    }
+
+    // Auto-save profiles if requested
+    if (saveAllProfiles && allProfiles.length > 0) {
+      try {
+        console.log(`💾 Auto-saving ${allProfiles.length} profiles...`);
+        
+        // Check which profiles are already saved
+        const { data: existingSaved, error: checkError } = await supabase
+          .from('user_saved_profiles')
+          .select('profile_id')
+          .eq('user_id', req.user.id)
+          .in('profile_id', allProfiles.map(p => p.id));
+
+        if (checkError) {
+          console.error('Error checking existing saved profiles:', checkError);
+        } else {
+          const existingProfileIds = new Set(existingSaved?.map(p => p.profile_id) || []);
+          const newProfilesToSave = allProfiles.filter(p => !existingProfileIds.has(p.id));
+
+          if (newProfilesToSave.length > 0) {
+            const { error: saveError } = await supabase
+              .from('user_saved_profiles')
+              .insert(
+                newProfilesToSave.map(profile => ({
+                  user_id: req.user.id,
+                  profile_id: profile.id,
+                  tags: []
+                }))
+              );
+
+            if (saveError) {
+              console.error('Error auto-saving profiles:', saveError);
+            } else {
+              console.log(`✅ Auto-saved ${newProfilesToSave.length} profiles successfully!`);
+            }
+          } else {
+            console.log(`ℹ️ All profiles were already saved`);
+          }
+        }
+      } catch (autoSaveError) {
+        console.error('Error in auto-save process:', autoSaveError);
+        // Don't fail the request if auto-save fails
+      }
+    }
 
     // Create response - ONLY profile details, no comments
     const response = {
@@ -1372,7 +1507,8 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
       profiles_failed: profilesFailed,
       processing_time: processingTime,
       profiles: allProfiles,
-      status: profilesFailed === 0 ? 'completed' : 'partial'
+      status: profilesFailed === 0 ? 'completed' : 'partial',
+      auto_saved: saveAllProfiles ? allProfiles.length : 0
     };
 
     console.log(`🎉 Mixed scraping completed! Profiles: ${allProfiles.length} (${profilesFromDb} from DB, ${profilesScraped} scraped)`);
@@ -1383,11 +1519,16 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     
     const processingTime = Date.now() - startTime;
     
-    await supabase.from('scraping_logs').update({
-      status: 'failed',
-      error_message: error.message,
-      processing_time: processingTime
-    }).eq('request_id', requestId);
+    if (logId) {
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: 'failed',
+          error_message: error.message,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', logId);
+    }
 
     res.status(500).json({ 
       error: 'Mixed scraping failed', 
@@ -1586,6 +1727,167 @@ app.get('/api/debug/keys', rateLimitMiddleware, authMiddleware, async (req, res)
 // Catch-all handler: send back React's index.html file for client-side routing
 app.get('*', (req, res) => {
   res.sendFile('index.html', { root: 'dist' });
+});
+
+// Update single profile endpoint
+app.post('/api/update-profile', async (req, res) => {
+  try {
+    const { profileId } = req.body;
+    const userId = req.headers['x-user-id'];
+
+    if (!profileId || !userId) {
+      return res.status(400).json({ error: 'Profile ID and User ID are required' });
+    }
+
+    // Get the profile from user's saved profiles
+    const { data: savedProfile, error: savedError } = await supabase
+      .from('user_saved_profiles')
+      .select('profile_id, linkedin_profiles(*)')
+      .eq('saved_profile_id', profileId)
+      .eq('user_id', userId)
+      .single();
+
+    if (savedError || !savedProfile) {
+      return res.status(404).json({ error: 'Profile not found in your saved profiles' });
+    }
+
+    const linkedinUrl = savedProfile.linkedin_profiles.linkedin_url;
+
+    // Get user's API keys
+    const { data: apiKeys, error: keysError } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'active');
+
+    if (keysError || !apiKeys || apiKeys.length === 0) {
+      return res.status(400).json({ error: 'No active API keys found' });
+    }
+
+    // Use the first available key
+    const apiKey = apiKeys[0];
+
+    // Scrape the profile using Apify
+    const profileData = await scrapeLinkedInProfile(linkedinUrl, apiKey.api_key);
+
+    if (!profileData) {
+      return res.status(500).json({ error: 'Failed to scrape profile data' });
+    }
+
+    // Update the profile in the global database
+    const { error: updateError } = await supabase
+      .from('linkedin_profiles')
+      .update({
+        ...profileData,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', savedProfile.profile_id);
+
+    if (updateError) {
+      console.error('Error updating profile:', updateError);
+      return res.status(500).json({ error: 'Failed to update profile' });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Profile updated successfully',
+      profileId: savedProfile.profile_id
+    });
+
+  } catch (error) {
+    console.error('Error in update-profile endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update multiple profiles endpoint
+app.post('/api/update-profiles', async (req, res) => {
+  try {
+    const { profileIds } = req.body;
+    const userId = req.headers['x-user-id'];
+
+    if (!profileIds || !Array.isArray(profileIds) || profileIds.length === 0) {
+      return res.status(400).json({ error: 'Profile IDs array is required' });
+    }
+
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    // Get user's API keys
+    const { data: apiKeys, error: keysError } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'active');
+
+    if (keysError || !apiKeys || apiKeys.length === 0) {
+      return res.status(400).json({ error: 'No active API keys found' });
+    }
+
+    const apiKey = apiKeys[0];
+    let updatedCount = 0;
+    const errors = [];
+
+    // Process profiles in parallel
+    const updatePromises = profileIds.map(async (savedProfileId) => {
+      try {
+        // Get the profile from user's saved profiles
+        const { data: savedProfile, error: savedError } = await supabase
+          .from('user_saved_profiles')
+          .select('profile_id, linkedin_profiles(*)')
+          .eq('saved_profile_id', savedProfileId)
+          .eq('user_id', userId)
+          .single();
+
+        if (savedError || !savedProfile) {
+          errors.push(`Profile ${savedProfileId} not found`);
+          return;
+        }
+
+        const linkedinUrl = savedProfile.linkedin_profiles.linkedin_url;
+
+        // Scrape the profile
+        const profileData = await scrapeLinkedInProfile(linkedinUrl, apiKey.api_key);
+
+        if (!profileData) {
+          errors.push(`Failed to scrape ${linkedinUrl}`);
+          return;
+        }
+
+        // Update the profile
+        const { error: updateError } = await supabase
+          .from('linkedin_profiles')
+          .update({
+            ...profileData,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', savedProfile.profile_id);
+
+        if (updateError) {
+          errors.push(`Failed to update ${linkedinUrl}: ${updateError.message}`);
+          return;
+        }
+
+        updatedCount++;
+      } catch (error) {
+        errors.push(`Error updating profile ${savedProfileId}: ${error.message}`);
+      }
+    });
+
+    await Promise.allSettled(updatePromises);
+
+    res.json({ 
+      success: true, 
+      updated: updatedCount,
+      total: profileIds.length,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (error) {
+    console.error('Error in update-profiles endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Start server
