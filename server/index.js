@@ -1,2426 +1,928 @@
-//Your system will now return actual results instead of just "initiated" messages, with proper database-first processing and crystal clear batch management! 🎉
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import { createClient } from '@supabase/supabase-js';
-import { RateLimiterMemory } from 'rate-limiter-flexible';
-import { v4 as uuidv4 } from 'uuid';
+//profile saving fixed
+import React, { useState, useEffect } from 'react';
+import { Search, Users, AlertCircle, CheckCircle, Loader2, MessageSquare, UserCheck } from 'lucide-react';
+import { useAuth } from '../hooks/useAuth';
+import { supabase } from '../lib/supabase';
+import { ScrapedProfiles } from './ScrapedProfiles';
 
-// Initialize Express app
-const app = express();
-app.use(helmet());
-
-// Configure CORS for production
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    // Allow localhost for development
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-      return callback(null, true);
-    }
-    
-    // Allow Netlify domains
-    if (origin.includes('netlify.app')) {
-      return callback(null, true);
-    }
-    
-    // Allow your custom domain (replace with your actual domain)
-    if (origin.includes('your-domain.com')) {
-      return callback(null, true);
-    }
-    
-    callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-  optionsSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
-app.use(express.json({ limit: '1mb' }));
-
-// Serve static files from the React app build
-// Serve frontend if build exists; otherwise provide a simple root response
-import fs from 'fs';
-if (fs.existsSync('dist')) {
-app.use(express.static('dist'));
-} else {
-  app.get('/', (req, res) => {
-    res.send('Backend is running. Build the frontend to serve static files.');
-  });
+interface LinkedInScraperProps {
+  onSuccess?: () => void;
 }
 
-// Normalize LinkedIn URLs by removing query params, fragments, trimming, and removing trailing slashes
-function normalizeLinkedInUrl(rawUrl) {
-  try {
-    if (!rawUrl || typeof rawUrl !== 'string') return '';
-    const trimmed = rawUrl.trim();
-    // Ensure we have a protocol for URL parsing
-    const candidate = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
-    const url = new URL(candidate);
-    // Only accept linkedin hostnames
-    if (!url.hostname.includes('linkedin.com')) return '';
-    // Drop search params and hash
-    url.search = '';
-    url.hash = '';
-    // Remove trailing slash from pathname unless root
-    url.pathname = url.pathname.replace(/\/+$/, '');
-    // Return without trailing slash and without default port
-    return `${url.protocol}//${url.hostname}${url.pathname}`;
-  } catch {
-    // Fallback: strip everything after ? or # if URL constructor fails
-    const base = String(rawUrl || '').trim();
-    return base.split('#')[0].split('?')[0].replace(/\/+$/, '');
-  }
+type ScrapingType = 'post-comments' | 'profile-details' | 'mixed';
+
+interface ScrapedProfile {
+  id: string;
+  linkedin_url: string;
+  full_name: string;
+  headline: string;
+  location: string;
+  job_title?: string;
+  about: string;
+  email: string;
+  mobile_number?: string;
+  phone?: string;
+  company_website?: string;
+  website?: string;
+  profile_image_url?: string;
+  profile_pic_high_quality?: string;
+  connection_count?: number;
+  connections?: number;
+  follower_count?: number;
+  followers?: number;
+  scraped_at: string;
+  // Additional fields from database
+  first_name?: string;
+  last_name?: string;
+  company_name?: string;
+  company_industry?: string;
+  company_linkedin?: string;
+  company_founded_in?: number; // decimal(6,2) in database
+  company_size?: string;
+  current_job_duration?: string;
+  current_job_duration_in_yrs?: number; // decimal(5,2) in database
+  address_country_only?: string;
+  address_with_country?: string;
+  address_without_country?: string;
+  profile_pic?: string;
+  profile_pic_all_dimensions?: any;
+  experiences?: any;
+  experience?: any;
+  educations?: any;
+  education?: any;
+  skills?: any;
+  top_skills_by_endorsements?: any;
+  license_and_certificates?: any;
+  honors_and_awards?: any;
+  languages?: any;
+  volunteer_and_awards?: any;
+  verifications?: any;
+  promos?: any;
+  highlights?: any;
+  projects?: any;
+  publications?: any;
+  patents?: any;
+  courses?: any;
+  test_scores?: any;
+  organizations?: any;
+  volunteer_causes?: any;
+  interests?: any;
+  recommendations?: any;
+  creator_website?: any;
+  updates?: any;
+  public_identifier?: string;
+  open_connection?: boolean;
+  urn?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
-// Initialize Supabase (prefer Service Role key on the server)
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-// Use service role key if available to allow secure server-side inserts/updates under RLS
-export const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY
-);
-
-// Simple auth via webhook token (Bearer <token>)
-export const authMiddleware = async (req, res, next) => {
-  try {
-    const auth = req.headers.authorization || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-    if (!token) {
-      return res.status(401).json({ error: 'Unauthorized', message: 'Missing token' });
-    }
-
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id')
-      .eq('webhook_token', token)
-      .single();
-
-    if (error || !user) {
-      return res.status(401).json({ error: 'Unauthorized', message: 'Invalid token' });
-    }
-
-    req.user = { id: user.id };
-    next();
-  } catch (err) {
-    next(err);
-  }
-};
-
-// Rate limiting
-const rateLimiter = new RateLimiterMemory({ points: 60, duration: 60 }); // 60 req/min
-export const rateLimitMiddleware = async (req, res, next) => {
-  try {
-    const key = req.user?.id || req.ip;
-    await rateLimiter.consume(key);
-    next();
-  } catch {
-    res.status(429).json({ error: 'Too Many Requests', message: 'Rate limit exceeded' });
-  }
-};
-
-// 🚀 IMPROVED API Key Rotation & Reactivation Logic for Apify
-// Priority-based initial assignment (active → rate_limited → failed) with runtime replacement system
-
-// Smart key assignment - True Round-Robin with intelligent batch key recovery
-// 🚀 OPTIMIZED FOR MULTI-ACCOUNT STRATEGY: Each key from different Apify accounts ($5/month each)
-// This system automatically rotates between accounts and recovers keys when accounts get new credits
-async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
-  console.log(`🔍 Smart Key Assignment: Need ${requiredCount} keys for user ${userId} (Multi-Account Strategy)`);
-  
-  // Get all keys for this provider
-  const { data: allKeys } = await supabase
-    .from('api_keys')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('provider', provider)
-    .order('last_used', { ascending: true, nullsFirst: true });
-
-  if (!allKeys || allKeys.length === 0) {
-    throw new Error(`No API keys found for provider: ${provider}`);
-  }
-
-  // 🔄 IMPROVED: Smart cooldown system that allows LRU rotation for potentially refreshed keys
-  const COOLDOWN_MINUTES = 1; // Reduced to 1 minute for faster rotation with multiple accounts
-  const now = new Date();
-  
-  // Separate keys by priority and filter out keys that failed in current request
-  const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
-  
-  // 🔑 RATE_LIMITED keys - ALWAYS test them for recovery (they might have new credits)
-  const rateLimitedKeys = allKeys.filter(key => {
-    if (key.status === 'rate_limited' && !failedKeysInRequest.has(key.id)) {
-      // Always test rate_limited keys - they might have new credits or rate limit reset
-      console.log(`🔄 Rate-limited key ${key.key_name} will be tested for recovery`);
-      return true;
-    }
-    return false;
-  });
-  
-  // 🔄 FAILED keys - implement proper LRU rotation for potentially refreshed keys
-  const failedKeys = allKeys.filter(key => {
-    if (key.status === 'failed' && !failedKeysInRequest.has(key.id)) {
-      // 🔑 KEY INSIGHT: Failed keys might have new credits now - use LRU rotation
-      if (key.last_failed) {
-        const lastFailedTime = new Date(key.last_failed);
-        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
-        
-        // If cooldown expired, this key could work now (new credits, rate limit reset, etc.)
-        if (cooldownExpired) {
-          console.log(`🔄 Key ${key.key_name} cooldown expired - may have new credits/rate limit reset`);
-          return true;
-        }
-      } else {
-        // No last_failed time, can use
-        return true;
-      }
-    }
-    return false;
-  });
-
-  console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed (excluding ${failedKeysInRequest.size} failed in current request)`);
-
-  // 🎯 STRATEGY: If we have enough active keys, use them directly
-  if (activeKeys.length >= requiredCount) {
-    console.log(`✅ SUFFICIENT ACTIVE KEYS: ${activeKeys.length} active >= ${requiredCount} needed`);
-    console.log(`🔄 Using Round-Robin distribution across ${activeKeys.length} active keys`);
-    
-    // Return keys in LRU order for round-robin distribution
-    const selectedKeys = activeKeys.slice(0, requiredCount);
-    console.log(`🎯 Round-Robin Assignment: ${selectedKeys.length} ACTIVE keys selected for distribution`);
-    return selectedKeys;
-  }
-
-  // ⚠️ INSUFFICIENT ACTIVE KEYS: Check if we need to test failed keys
-  const MIN_ACTIVE_KEYS_NEEDED = 2; // Reduced to 2 for better multi-account utilization
-  
-  if (activeKeys.length >= MIN_ACTIVE_KEYS_NEEDED) {
-    console.log(`✅ SUFFICIENT ACTIVE KEYS: ${activeKeys.length} active >= ${MIN_ACTIVE_KEYS_NEEDED} minimum needed`);
-    console.log(`🔄 No need to test failed keys - using available active keys with rotation`);
-    
-    // Use available active keys with rotation (will cycle back as needed)
-    const selectedKeys = activeKeys.slice(0, Math.min(requiredCount, activeKeys.length));
-    console.log(`🎯 Using ${selectedKeys.length} active keys with rotation for ${requiredCount} operations`);
-    return selectedKeys;
-  }
-
-  // 🔄 NEED TO TEST FAILED KEYS: Only when we have less than 3 active keys
-  console.log(`⚠️ INSUFFICIENT ACTIVE KEYS: ${activeKeys.length} active < ${MIN_ACTIVE_KEYS_NEEDED} minimum needed`);
-  console.log(`🔄 Testing rate-limited and failed keys in BATCH PARALLEL to increase active pool...`);
-
-  // 🔄 BATCH PARALLEL TESTING: Test all keys at once instead of one by one
-  let recoveredKeys = [];
-  
-  if (rateLimitedKeys.length > 0 || failedKeys.length > 0) {
-    // Combine all keys that need testing
-    const keysToTest = [...rateLimitedKeys, ...failedKeys];
-    console.log(`🧪 BATCH TESTING: ${keysToTest.length} keys (${rateLimitedKeys.length} rate_limited + ${failedKeys.length} failed)`);
-    
-    // Test all keys in parallel using Promise.all for maximum speed
-    const testPromises = keysToTest.map(async (key) => {
-      try {
-        const testResult = await testAndUpdateApiKey(supabase, key);
-        return {
-          key: key,
-          success: testResult.success,
-          status: testResult.key.status,
-          keyName: key.key_name
-        };
-      } catch (error) {
-        return {
-          key: key,
-          success: false,
-          status: 'failed',
-          keyName: key.key_name,
-          error: error.message
-        };
-      }
-    });
-    
-    // Wait for all tests to complete in parallel
-    console.log(`⚡ Starting parallel testing of ${keysToTest.length} keys...`);
-    const testResults = await Promise.all(testPromises);
-    
-    // Process results and categorize keys
-    let newlyActive = 0;
-    let stillRateLimited = 0;
-    let stillFailed = 0;
-    
-    for (const result of testResults) {
-      if (result.success && result.status === 'active') {
-        recoveredKeys.push(result.key);
-        newlyActive++;
-        console.log(`✅ Key recovered: ${result.keyName} - now ACTIVE (from different account)`);
-      } else if (result.success && result.status === 'rate_limited') {
-        stillRateLimited++;
-        console.log(`⚠️ Key still rate limited: ${result.keyName} (account may have daily limit)`);
-      } else {
-        stillFailed++;
-        console.log(`❌ Key still failed: ${result.keyName}${result.error ? ` (${result.error})` : ''} (account may be exhausted)`);
-      }
-    }
-    
-    console.log(`🔄 BATCH TESTING COMPLETED: ${newlyActive} recovered, ${stillRateLimited} still rate_limited, ${stillFailed} still failed`);
-  }
-
-  // 🔄 PHASE 3: Combine all available keys and distribute
-  const allAvailableKeys = [...activeKeys, ...recoveredKeys];
-  console.log(`🔑 Final Key Pool: ${allAvailableKeys.length} total available (${activeKeys.length} original + ${recoveredKeys.length} recovered)`);
-
-  if (allAvailableKeys.length >= requiredCount) {
-    // We have enough keys now - distribute them
-    const selectedKeys = allAvailableKeys.slice(0, requiredCount);
-    console.log(`🎯 SUCCESS: ${selectedKeys.length} keys selected for Round-Robin distribution`);
-    console.log(`🔄 Keys will be distributed across ${requiredCount} operations`);
-    return selectedKeys;
-  } else {
-    // Still not enough keys - use what we have with fallback
-    console.log(`⚠️ WARNING: Only ${allAvailableKeys.length} keys available for ${requiredCount} operations`);
-    console.log(`🔄 Will reuse keys across operations (not ideal but necessary)`);
-    
-    // If we have some keys, use them
-    if (allAvailableKeys.length > 0) {
-      return allAvailableKeys;
-    }
-    
-    // No keys available at all
-    console.log(`❌ No keys available for assignment`);
-    return [];
-  }
+interface CommentData {
+  id: string;
+  linkedinUrl: string;
+  commentary: string;
+  createdAt: string;
+  createdAtTimestamp: number;
+  engagement: {
+    likes: number;
+    comments: number;
+    shares: number;
+    impressions: number;
+    reactions: Array<{
+      type: string;
+      count: number;
+    }>;
+  };
+  postId: string;
+  pinned: boolean;
+  contributed: boolean;
+  edited: boolean;
+  actor: {
+    id: string;
+    name: string;
+    linkedinUrl: string;
+    position: string;
+    pictureUrl: string;
+    picture: {
+      url: string;
+      width: number;
+      height: number;
+      expiresAt: number;
+    };
+    author: boolean;
+  };
+  query: {
+    post: string;
+  };
+  selected?: boolean; // For checkbox selection
 }
 
-// Function to get replacement key when current key fails (prioritizes newly activated keys)
-async function getReplacementKey(supabase, userId, provider, failedKeysInRequest = new Set(), recentlyActivatedKeys = new Set()) {
-  // Get all keys for this provider
-  const { data: allKeys } = await supabase
-    .from('api_keys')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('provider', provider)
-    .order('last_used', { ascending: true, nullsFirst: true });
+export const LinkedInScraper: React.FC<LinkedInScraperProps> = ({ onSuccess }) => {
+  const { user } = useAuth();
+  const [scrapingType, setScrapingType] = useState<ScrapingType>('post-comments');
+  const [postUrls, setPostUrls] = useState<string>('');
+  const [profileUrls, setProfileUrls] = useState<string>('');
+  const [isScraping, setIsScraping] = useState(false);
+  const [scrapedProfiles, setScrapedProfiles] = useState<ScrapedProfile[]>([]);
+  const [commentData, setCommentData] = useState<CommentData[]>([]);
+  const [selectedCommenters, setSelectedCommenters] = useState<Set<string>>(new Set());
+  const [isScrapingProfiles, setIsScrapingProfiles] = useState(false);
+  const [viewMode, setViewMode] = useState<'list' | 'table'>('table');
+  const [error, setError] = useState<string>('');
+  const [success, setSuccess] = useState<string>('');
+  const [saveAllProfiles, setSaveAllProfiles] = useState<boolean>(false);
 
-  if (!allKeys || allKeys.length === 0) {
-    throw new Error(`No API keys found for provider: ${provider}`);
-  }
-
-  // 🔄 IMPROVED: Smart filtering that allows LRU rotation for potentially refreshed keys
-  const COOLDOWN_MINUTES = 1; // Same cooldown as main function for faster rotation
-  const now = new Date();
-  
-  // Separate keys by priority and filter out keys that failed in current request
-  const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
-  
-  // 🔑 RATE_LIMITED keys - check if they might have been refreshed
-  const rateLimitedKeys = allKeys.filter(key => {
-    if (key.status === 'rate_limited' && !failedKeysInRequest.has(key.id)) {
-      // Allow rate_limited keys to be used if cooldown passed (they might have new credits)
-      if (key.last_failed) {
-        const lastFailedTime = new Date(key.last_failed);
-        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
-        return cooldownExpired;
-      }
-      return true; // No last_failed time, can use
+  // Reset saveAllProfiles when switching to post-comments scraper
+  useEffect(() => {
+    if (scrapingType === 'post-comments') {
+      setSaveAllProfiles(false);
     }
-    return false;
-  });
-  
-  // 🔄 FAILED keys - implement proper LRU rotation for potentially refreshed keys
-  const failedKeys = allKeys.filter(key => {
-    if (key.status === 'failed' && !failedKeysInRequest.has(key.id)) {
-      // 🔑 KEY INSIGHT: Failed keys might have new credits now - use LRU rotation
-      if (key.last_failed) {
-        const lastFailedTime = new Date(key.last_failed);
-        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
-        
-        // If cooldown expired, this key could work now (new credits, rate limit reset, etc.)
-        if (cooldownExpired) {
-          console.log(`🔄 Replacement: Key ${key.key_name} cooldown expired - may have new credits/rate limit reset`);
-          return true;
-        }
-      } else {
-        // No last_failed time, can use
-        return true;
+  }, [scrapingType]);
+
+  const handleScrape = async () => {
+    let urls: string[] = [];
+    let inputType = '';
+
+    // Validate input based on scraping type
+    if (scrapingType === 'post-comments' || scrapingType === 'mixed') {
+      if (!postUrls.trim()) {
+        setError('Please enter at least one LinkedIn post URL');
+        return;
       }
-    }
-    return false;
-  });
-
-  console.log(`🔄 Replacement Key Search: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed available`);
-
-  // 🚀 PRIORITY 1: Recently activated keys (highest priority)
-  const recentlyActivated = activeKeys.filter(key => recentlyActivatedKeys.has(key.id));
-  if (recentlyActivated.length > 0) {
-    const replacementKey = recentlyActivated[0]; // Get least recently used recently activated key
-    console.log(`🚀 Found replacement: Recently activated key ${replacementKey.key_name} (highest priority)`);
-    return replacementKey;
-  }
-
-  // ✅ PRIORITY 2: Other active keys (least recently used first)
-  const otherActiveKeys = activeKeys.filter(key => !recentlyActivatedKeys.has(key.id));
-  if (otherActiveKeys.length > 0) {
-    const replacementKey = otherActiveKeys[0]; // Already sorted by LRU
-    console.log(`✅ Found replacement: Active key ${replacementKey.key_name}`);
-    return replacementKey;
-  }
-
-  // ⚠️ PRIORITY 3: Rate-limited keys (least recently used first)
-  if (rateLimitedKeys.length > 0) {
-    const replacementKey = rateLimitedKeys[0]; // Already sorted by LRU
-    console.log(`⚠️ Found replacement: Rate-limited key ${replacementKey.key_name}`);
-    return replacementKey;
-  }
-
-  // 🔴 PRIORITY 4: Failed keys (least recently used first) - IMPROVED LRU rotation
-  if (failedKeys.length > 0) {
-    const replacementKey = failedKeys[0]; // Already sorted by LRU
-    console.log(`🔴 Found replacement: Failed key ${replacementKey.key_name}`);
-    console.log(`🔄 Using LRU rotation - this key may have new credits or rate limit reset`);
-    return replacementKey;
-  }
-
-  throw new Error('No replacement keys available');
-}
-
-// Test a single API key and update its status
-async function testAndUpdateApiKey(supabase, key) {
-  try {
-    console.log(`🧪 Testing key: ${key.key_name} (current status: ${key.status})`);
-    
-    // Test Apify API key by making a simple request
-    const testResponse = await fetch('https://api.apify.com/v2/users/me', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${key.api_key}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (testResponse.ok) {
-      // Key works - mark as active regardless of previous status
-      await supabase.from('api_keys').update({
-        last_used: new Date().toISOString(),
-        status: 'active',
-        failure_count: 0
-      }).eq('id', key.id);
-
-      console.log(`✅ Key ${key.key_name} is now ACTIVE`);
-      return { success: true, key: { ...key, status: 'active' } };
-      
-    } else if (testResponse.status === 429) {
-      // Rate limited - mark as rate_limited
-      await supabase.from('api_keys').update({
-        status: 'rate_limited',
-        last_failed: new Date().toISOString()
-      }).eq('id', key.id);
-
-      console.log(`⏳ Key ${key.key_name} is RATE_LIMITED`);
-      return { success: false, key: { ...key, status: 'rate_limited' } };
-      
-    } else {
-      // Other error - mark as failed
-      const errorText = await testResponse.text().catch(() => 'Unknown error');
-      await supabase.from('api_keys').update({
-        status: 'failed',
-        last_failed: new Date().toISOString()
-      }).eq('id', key.id);
-
-      console.log(`❌ Key ${key.key_name} is FAILED (HTTP ${testResponse.status}): ${errorText}`);
-      
-      // Special handling for account-level limits
-      if (testResponse.status === 402 || errorText.includes('insufficient') || errorText.includes('platform-feature-disabled')) {
-        console.log(`💳 Account limit detected for key ${key.key_name} - will retry after cooldown`);
-      }
-      
-      return { success: false, key: { ...key, status: 'failed' } };
-    }
-    
-  } catch (error) {
-    // Network/other error - mark as failed
-    await supabase.from('api_keys').update({
-      status: 'failed',
-      last_failed: new Date().toISOString()
-    }).eq('id', key.id);
-
-    console.log(`❌ Key ${key.key_name} is FAILED (error: ${error.message})`);
-    return { success: false, key: { ...key, status: 'failed' } };
-  }
-}
-
-// Function to call Apify API with smart key rotation
-async function callApifyAPI(endpoint, apiKey, options = {}) {
-  const { method = 'GET', body = null, timeoutMs = 30000 } = options;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    console.log(`🤖 Calling Apify API: ${endpoint}`);
-    
-    const response = await fetch(`https://api.apify.com/v2/${endpoint}`, {
-      method,
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : null,
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ Apify API error:`, errorText);
-      
-      if (response.status === 401) {
-        throw new Error('Invalid API key');
-      } else if (response.status === 429) {
-          throw new Error('Rate limited - please try again later');
-      } else if (response.status === 402) {
-        throw new Error('Insufficient credits');
-      } else {
-        throw new Error(`Apify API error: ${response.status} - ${errorText}`);
-      }
+      urls = postUrls
+        .split('\n')
+        .map(url => url.trim())
+        .filter(url => url && url.includes('linkedin.com/posts/'));
+      inputType = 'post';
     }
 
-    const data = await response.json();
-    console.log(`✅ Apify API call successful`);
-    return data;
-
-  } catch (error) {
-    console.error(`❌ Error with Apify API:`, error.message);
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// Main LinkedIn scraping endpoint
-app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  const startTime = Date.now();
-  const requestId = `prof_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
-  let logId = null;
-  
-  // Track keys that failed during this request to prevent reuse
-  const failedKeysInRequest = new Set();
-  
-  try {
-    const { profileUrls, saveAllProfiles = false } = req.body;
-    
-    if (!profileUrls || !Array.isArray(profileUrls) || profileUrls.length === 0) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'profileUrls array is required' 
-      });
+    if (scrapingType === 'profile-details') {
+    if (!profileUrls.trim()) {
+      setError('Please enter at least one LinkedIn profile URL');
+      return;
     }
-
-    // Validate and sanitize profile URLs
-    const validUrls = profileUrls
-      .map(u => normalizeLinkedInUrl(u))
+      urls = profileUrls
+      .split('\n')
+      .map(url => url.trim())
       .filter(url => url && url.includes('linkedin.com/in/'));
-
-    if (validUrls.length === 0) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'No valid LinkedIn profile URLs provided' 
-      });
+      inputType = 'profile';
     }
 
-    // Log the request (aligned with schema)
+    // Mixed scraper only uses post URLs (no additional profile URLs needed)
+
+    if (urls.length === 0) {
+      setError(`Please enter valid LinkedIn ${inputType} URLs`);
+      return;
+    }
+
+    setIsScraping(true);
+    setError('');
+    setSuccess('');
+
     try {
-      const { data: logRow } = await supabase
-        .from('scraping_logs')
-        .insert({
-        user_id: req.user.id,
-          scraping_type: 'profile-details',
-          input_urls: validUrls,
-          status: 'running',
-          started_at: new Date().toISOString()
-        })
-        .select('id')
-        .single();
-      logId = logRow?.id || null;
-    } catch (dbError) {
-      console.warn('⚠️ Failed to log request to database:', dbError.message);
-      // Continue with scraping even if logging fails
-    }
-
-    // 🚀 IMPROVED: Use the new smart key assignment system
-    console.log(`🔍 Looking for API keys for user: ${req.user.id}`);
-    
-    // Track keys that become active during scraping
-    const recentlyActivatedKeys = new Set();
-    
-    // Determine batches and request keys accordingly (round-robin per batch)
-    const INITIAL_BATCH_SIZE = 10; // Changed to 10 for maximum speed as requested
-    const initialBatches = [];
-    for (let i = 0; i < validUrls.length; i += INITIAL_BATCH_SIZE) {
-      initialBatches.push(validUrls.slice(i, i + INITIAL_BATCH_SIZE));
-    }
-    const requiredKeyCount = Math.max(1, initialBatches.length);
-
-    // Get Apify keys for scraping - ensure we have at least 5 active keys
-    let selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, failedKeysInRequest);
-    
-    // Check total active keys available (not just selected ones)
-    const { data: allActiveKeys } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'apify')
-      .eq('status', 'active');
-    
-    // If we have less than 5 active keys, test all failed/rate_limited keys to reactivate them
-    if (allActiveKeys.length < 5) {
-      console.log(`🔧 Less than 5 active keys (${allActiveKeys.length}), testing failed/rate_limited keys...`);
+      // Call the appropriate backend API based on scraping type
+      let endpoint, body;
       
-      // Get all non-active keys
-      const { data: inactiveKeys } = await supabase
-        .from('api_keys')
-        .select('*')
-        .eq('user_id', req.user.id)
-        .eq('service', 'apify')
-        .in('status', ['failed', 'rate_limited']);
-      
-      if (inactiveKeys && inactiveKeys.length > 0) {
-        console.log(`🧪 Testing ${inactiveKeys.length} inactive keys...`);
-        
-        // Test each inactive key
-        const testPromises = inactiveKeys.map(async (key) => {
-          const testResult = await testAndUpdateApiKey(supabase, key);
-          if (testResult.success) {
-            console.log(`✅ Reactivated key: ${key.key_name}`);
-            return testResult.key;
-          }
-          return null;
-        });
-        
-        const testResults = await Promise.allSettled(testPromises);
-        const reactivatedKeys = testResults
-          .filter(result => result.status === 'fulfilled' && result.value)
-          .map(result => result.value);
-        
-        if (reactivatedKeys.length > 0) {
-          console.log(`🎉 Reactivated ${reactivatedKeys.length} keys!`);
-          // Get fresh key assignment with reactivated keys
-          selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, failedKeysInRequest);
-        }
-      }
-    }
-    
-    console.log(`🔑 Using ${selectedKeys.length} active keys for processing`);
-    
-    if (!selectedKeys || selectedKeys.length === 0) {
-      console.log(`❌ No API keys available for user ${req.user.id}`);
-      
-      if (logId) {
-        await supabase
-          .from('scraping_logs')
-          .update({
-        status: 'failed',
-        error_message: 'No Apify API keys available (all keys are inactive)',
-            completed_at: new Date().toISOString()
-          })
-          .eq('id', logId);
+      if (scrapingType === 'profile-details') {
+        endpoint = '/api/scrape-linkedin';
+        body = { profileUrls: urls, saveAllProfiles };
+      } else if (scrapingType === 'post-comments') {
+        endpoint = '/api/scrape-post-comments';
+        body = { postUrls: urls, scrapingType };
+      } else if (scrapingType === 'mixed') {
+        endpoint = '/api/scrape-mixed';
+        body = { 
+          postUrls: postUrls.split('\n').map(url => url.trim()).filter(url => url && url.includes('linkedin.com/posts/')),
+          saveAllProfiles
+        };
       }
 
-      return res.status(400).json({ 
-        error: 'No API keys', 
-        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
-        status: 'failed',
-        profiles: [],
-        profiles_scraped: 0,
-        profiles_failed: validUrls.length
+      // Use the API base URL from environment variable, fallback to current origin for development
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+      const fullEndpoint = `${apiBaseUrl}${endpoint}`;
+      
+      const response = await fetch(fullEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user?.webhook_token}`
+        },
+        body: JSON.stringify(body)
       });
-    }
 
-    console.log(`🔑 Found ${selectedKeys.length} Apify API keys for user ${req.user.id}`);
-    
-    const scrapedProfiles = [];
-    let profilesScraped = 0;
-    let profilesFailed = 0;
-
-        // 🚀 CRYSTAL CLEAR PROFILE PROCESSING - Database First Approach
-    console.log(`🚀 Starting crystal clear processing of ${validUrls.length} profiles...`);
-    
-    // Step 1: Check database first and save to user's collection
-    console.log(`📋 Step 1: Checking database for existing profiles...`);
-    const profilesFromDb = [];
-    const profilesToScrape = [];
-    
-    for (const profileUrl of validUrls) {
-      const { data: existingProfile } = await supabase
-          .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-        .single();
-      
-      if (existingProfile) {
-        console.log(`✅ Profile found in database: ${profileUrl}`);
-        profilesFromDb.push(existingProfile);
-        
-        // Save to user's collection if not already saved
-        const { data: existingSaved } = await supabase
-          .from('user_saved_profiles')
-          .select('profile_id')
-          .eq('user_id', req.user.id)
-          .eq('profile_id', existingProfile.id)
-          .limit(1);
-
-        if (!existingSaved || existingSaved.length === 0) {
-          await supabase.from('user_saved_profiles').insert({
-            user_id: req.user.id,
-            profile_id: existingProfile.id,
-            tags: []
-          });
-          console.log(`💾 Saved existing profile to user collection: ${profileUrl}`);
-        }
-      } else {
-        console.log(`🔄 Profile not in database, will scrape: ${profileUrl}`);
-        profilesToScrape.push(profileUrl);
-      }
-    }
-    
-    console.log(`📊 Database check complete: ${profilesFromDb.length} found, ${profilesToScrape.length} to scrape`);
-    
-    // Step 2: Process profiles that need scraping
-    if (profilesToScrape.length === 0) {
-      console.log(`✅ All profiles found in database! No scraping needed.`);
-      const response = {
-        success: true,
-        status: 'completed',
-        message: `All ${profilesFromDb.length} profiles found in database!`,
-        profiles: profilesFromDb,
-        total_profiles_processed: validUrls.length,
-        profiles_from_db: profilesFromDb.length,
-        profiles_scraped: 0,
-        profiles_failed: 0,
-        processing_time_ms: Date.now() - startTime
-      };
-      
-      if (logId) {
-        await supabase
-          .from('scraping_logs')
-          .update({
-            status: 'completed',
-            profiles_scraped: 0,
-            profiles_failed: 0,
-            completed_at: new Date().toISOString()
-          })
-          .eq('id', logId);
-      }
-      
-      return res.json(response);
-    }
-    
-    // Step 3: Create batches for profiles to scrape
-    const SCRAPING_BATCH_SIZE = 10; // Crystal clear batch size
-    const scrapingBatches = [];
-    for (let i = 0; i < profilesToScrape.length; i += SCRAPING_BATCH_SIZE) {
-      scrapingBatches.push(profilesToScrape.slice(i, i + SCRAPING_BATCH_SIZE));
-    }
-    
-    console.log(`📦 Created ${scrapingBatches.length} batches of up to ${SCRAPING_BATCH_SIZE} profiles each`);
-    
-    // Step 4: Process batches in parallel with round-robin key assignment
-    console.log(`🚀 Starting parallel batch processing...`);
-    
-    // Helper function to process a single profile with an assigned key
-    const processProfile = async (profileUrl, initialKey) => {
-      let currentApiKey = initialKey;
-      let attempts = 0;
-      const maxAttempts = Math.min(5, selectedKeys.length); // Try up to 5 different keys
-      const failedKeysInThisRequest = new Set(); // Track keys that fail in this specific request
-      
-      while (attempts < maxAttempts) {
+      // Check if response is ok first
+      if (!response.ok) {
+        // Try to get error message from response
+        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
         try {
-          console.log(`🔍 Scraping profile: ${profileUrl} (attempt ${attempts + 1}/${maxAttempts}) with key: ${currentApiKey.key_name}`);
-        
-        // Start the LinkedIn profile scraper actor
-          const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', currentApiKey.api_key, {
-          method: 'POST',
-            body: { profileUrls: [profileUrl] }
-        });
-
-        if (!actorRun.data?.id) {
-          throw new Error('Failed to start actor run');
-        }
-
-        const runId = actorRun.data.id;
-        console.log(`🎬 Actor run started: ${runId}`);
-
-        // Poll for completion (max 60 attempts ~5 minutes)
-        let pollAttempts = 0;
-        let runStatus = 'RUNNING';
-        
-        while (pollAttempts < 60 && runStatus === 'RUNNING') {
-          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-          pollAttempts++;
-          
-          const statusResponse = await callApifyAPI(`acts/2SyF0bVxmgGr8IVCZ/runs/${runId}`, currentApiKey.api_key);
-          runStatus = statusResponse.data?.status;
-          
-          if (runStatus === 'FAILED') {
-            throw new Error('Actor run failed');
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const errorData = await response.json();
+            errorMessage = errorData.message || errorData.error || errorMessage;
+          } else {
+            const errorText = await response.text();
+            if (errorText) {
+              errorMessage = errorText;
+            }
           }
+        } catch (parseError) {
+          console.warn('Could not parse error response:', parseError);
         }
+        throw new Error(errorMessage);
+      }
 
-        if (runStatus !== 'SUCCEEDED') {
-          throw new Error(`Actor run timed out or failed: ${runStatus}`);
-        }
+      // Validate response content type before parsing JSON
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const responseText = await response.text();
+        throw new Error(`Expected JSON response but got: ${contentType || 'unknown content type'}. Response: ${responseText.substring(0, 200)}...`);
+      }
 
-        // Get the dataset ID
-        const runInfo = await callApifyAPI(`acts/2SyF0bVxmgGr8IVCZ/runs/${runId}`, currentApiKey.api_key);
-        const datasetId = runInfo.data?.defaultDatasetId;
+      // Parse JSON response
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        const responseText = await response.text();
+        const errorMessage = jsonError instanceof Error ? jsonError.message : 'Unknown JSON parsing error';
+        throw new Error(`Invalid JSON response: ${errorMessage}. Response: ${responseText.substring(0, 200)}...`);
+      }
+
+      setSuccess(`Scraping initiated for ${urls.length} ${inputType}(s). Check the results below.`);
+      
+      // Handle different response types
+      if (data.profiles && data.profiles.length > 0) {
+        setScrapedProfiles(data.profiles);
         
-        if (!datasetId) {
-          throw new Error('No dataset ID from actor run');
-        }
-
-        // Wait a bit for data to be available
-        await new Promise(resolve => setTimeout(resolve, 10000));
-
-        // Fetch the scraped data
-        const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, currentApiKey.api_key);
-        const scrapedData = datasetResponse || [];
-
-        if (scrapedData.length === 0) {
-          throw new Error('No data returned from scraper');
-        }
-
-        // Process the scraped profile data
-        const profileData = scrapedData[0]; // First item should be the profile data
-        
-        // Debug: Log the raw data from Apify to understand the structure
-        console.log(`🔍 Raw profile data from Apify for ${profileUrl}:`, {
-          companyFoundedIn: profileData.companyFoundedIn,
-          currentJobDurationInYrs: profileData.currentJobDurationInYrs,
-          connections: profileData.connections,
-          followers: profileData.followers,
-          openConnection: profileData.openConnection
-        });
-        
-        // Helper function to safely convert values to integers
-        const safeInteger = (value) => {
-          if (value === null || value === undefined || value === '') return null;
-          const parsed = parseInt(value);
-          return isNaN(parsed) ? null : parsed;
-        };
-
-        // Helper function to safely convert values to numbers
-        const safeNumber = (value) => {
-          if (value === null || value === undefined || value === '') return null;
-          const parsed = parseFloat(value);
-          return isNaN(parsed) ? null : parsed;
-        };
-
-        // Helper function to safely convert values to strings
-        const safeString = (value) => {
-          if (value === null || value === undefined) return null;
-          return String(value).trim() || null;
-        };
-
-        // Helper function to safely convert values to booleans
-        const safeBoolean = (value) => {
-          if (value === null || value === undefined) return null;
-          if (typeof value === 'boolean') return value;
-          if (typeof value === 'string') {
-            const lower = value.toLowerCase();
-            return lower === 'true' || lower === '1' || lower === 'yes';
-          }
-          return Boolean(value);
-        };
-
-          // Insert new profile into global table with enhanced structure
-          const { data: newProfile, error: insertError } = await supabase
-            .from('linkedin_profiles')
-            .insert({
-            linkedin_url: safeString(profileUrl),
-            first_name: safeString(profileData.firstName),
-            last_name: safeString(profileData.lastName),
-            full_name: safeString(profileData.fullName),
-            headline: safeString(profileData.headline),
-            connections: safeInteger(profileData.connections),
-            followers: safeInteger(profileData.followers),
-            email: safeString(profileData.email),
-            mobile_number: safeString(profileData.mobileNumber),
-            job_title: safeString(profileData.jobTitle),
-            company_name: safeString(profileData.companyName),
-            company_industry: safeString(profileData.companyIndustry),
-            company_website: safeString(profileData.companyWebsite),
-            company_linkedin: safeString(profileData.companyLinkedin),
-            company_founded_in: safeNumber(profileData.companyFoundedIn),
-            company_size: safeString(profileData.companySize),
-            current_job_duration: safeString(profileData.currentJobDuration),
-            current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
-            top_skills_by_endorsements: profileData.topSkillsByEndorsements || null,
-            address_country_only: safeString(profileData.addressCountryOnly),
-            address_with_country: safeString(profileData.addressWithCountry),
-            address_without_country: safeString(profileData.addressWithoutCountry),
-            profile_pic: safeString(profileData.profilePic),
-            profile_pic_high_quality: safeString(profileData.profilePicHighQuality),
-            about: safeString(profileData.about),
-            public_identifier: safeString(profileData.publicIdentifier),
-            open_connection: safeBoolean(profileData.openConnection),
-            urn: safeString(profileData.urn),
-            creator_website: profileData.creatorWebsite || null,
-            experiences: profileData.experiences || null,
-            updates: profileData.updates || null,
-            skills: profileData.skills || null,
-            profile_pic_all_dimensions: profileData.profilePicAllDimensions || null,
-            educations: profileData.educations || null,
-            license_and_certificates: profileData.licenseAndCertificates || null,
-            honors_and_awards: profileData.honorsAndAwards || null,
-            languages: profileData.languages || null,
-            volunteer_and_awards: profileData.volunteerAndAwards || null,
-            verifications: profileData.verifications || null,
-            promos: profileData.promos || null,
-            highlights: profileData.highlights || null,
-            projects: profileData.projects || null,
-            publications: profileData.publications || null,
-            patents: profileData.patents || null,
-            courses: profileData.courses || null,
-            test_scores: profileData.testScores || null,
-            organizations: profileData.organizations || null,
-            volunteer_causes: profileData.volunteerCauses || null,
-            interests: profileData.interests || null,
-            recommendations: profileData.recommendations || null
-            })
-            .select()
-            .single();
-
-          if (insertError) {
-          console.error('❌ Database insertion error for profile:', profileUrl);
-          console.error('Error details:', insertError);
-          console.error('Profile data being inserted:', {
-            linkedin_url: safeString(profileUrl),
-            first_name: safeString(profileData.firstName),
-            last_name: safeString(profileData.lastName),
-            full_name: safeString(profileData.fullName),
-            headline: safeString(profileData.headline),
-            connections: safeInteger(profileData.connections),
-            followers: safeInteger(profileData.followers),
-            company_founded_in: safeNumber(profileData.companyFoundedIn),
-            current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
-            open_connection: safeBoolean(profileData.openConnection)
-          });
-          throw new Error(`Failed to save profile data: ${insertError.message}`);
-        }
-
-          console.log(`✅ New profile saved: ${profileUrl}`);
-
-        // Per-profile immediate auto-save to user's collection
-        if (saveAllProfiles && newProfile?.id) {
+        // Auto-save all profiles if option is enabled
+        if (saveAllProfiles) {
           try {
-            const { data: existingSaved } = await supabase
-              .from('user_saved_profiles')
-              .select('profile_id')
-              .eq('user_id', req.user.id)
-              .eq('profile_id', newProfile.id)
-              .limit(1);
-            if (!existingSaved || existingSaved.length === 0) {
-              await supabase.from('user_saved_profiles').insert({
-                user_id: req.user.id,
-                profile_id: newProfile.id,
-                tags: []
-              });
-            }
-          } catch (_) {}
-        }
-
-        return { profile: newProfile, fromDb: false };
-
-      } catch (error) {
-          console.error(`❌ Failed to scrape profile ${profileUrl} with key ${currentApiKey.key_name}:`, error.message);
-          
-          // Check if this is an account limit error - mark key as failed immediately
-          if (error.message.includes('Monthly usage hard limit exceeded') || 
-              error.message.includes('platform-feature-disabled') ||
-              error.message.includes('Insufficient credits') ||
-              error.message.includes('403') ||
-              error.message.includes('Rate limited')) {
-            console.log(`💳 Account limit detected for key ${currentApiKey.key_name} - marking as failed immediately`);
-            // Mark this key as failed in the database immediately
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString()
-            }).eq('id', currentApiKey.id);
-            
-            // Add to failed keys for this request
-            failedKeysInThisRequest.add(currentApiKey.id);
+            const savePromises = data.profiles.map((profile: ScrapedProfile) => handleSaveProfile(profile));
+            await Promise.allSettled(savePromises);
+            setSuccess(`Scraping completed! ${data.profiles.length} profiles have been automatically saved to your collection.`);
+          } catch (saveError) {
+            console.error('Error auto-saving profiles:', saveError);
+            setSuccess(`Scraping completed! However, there was an issue auto-saving some profiles. You can save them manually from the results below.`);
           }
-          
-          attempts++;
-          if (attempts < maxAttempts) {
-            // Find next available key (not failed in this request)
-            let nextKeyIndex = -1;
-            for (let i = 0; i < selectedKeys.length; i++) {
-              const keyIndex = (selectedKeys.indexOf(initialKey) + attempts + i) % selectedKeys.length;
-              const candidateKey = selectedKeys[keyIndex];
-              if (!failedKeysInThisRequest.has(candidateKey.id)) {
-                nextKeyIndex = keyIndex;
-                break;
-              }
-            }
-            
-            if (nextKeyIndex !== -1) {
-              currentApiKey = selectedKeys[nextKeyIndex];
-              console.log(`🔄 Retrying with next available key: ${currentApiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
-            } else {
-              console.log(`❌ No more available keys for profile ${profileUrl}`);
-              return { error: 'All keys failed in this request' };
-            }
-          } else {
-            console.log(`❌ All attempts failed for profile ${profileUrl}`);
-        return { error: error.message };
-      }
         }
       }
-      
-      // If we get here, all attempts failed
-      return { error: 'All key attempts failed' };
-    };
+      if (data.comments && data.comments.length > 0) {
+        setCommentData(data.comments);
+      }
 
-        // Process ALL batches in parallel, each batch assigned a key via round-robin
-    const batchPromises = scrapingBatches.map((batch, batchIndex) => {
-      const assignedKey = selectedKeys[Math.max(0, batchIndex % Math.max(1, selectedKeys.length))];
-      console.log(`🔄 Batch ${batchIndex + 1}/${scrapingBatches.length} assigned key: ${assignedKey.key_name}`);
-      return Promise.allSettled(batch.map(url => processProfile(url, assignedKey)));
-    });
+      onSuccess?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred during scraping');
+    } finally {
+      setIsScraping(false);
+    }
+  };
 
-    const batchResults = await Promise.allSettled(batchPromises);
-
-    // Accumulate results from all batches
-    batchResults.forEach((batchResult, bIdx) => {
-      if (batchResult.status === 'fulfilled') {
-        const results = batchResult.value;
-        results.forEach((result, i) => {
-          const url = scrapingBatches[bIdx][i];
-          if (result.status === 'fulfilled') {
-            const { profile } = result.value;
-            if (profile) {
-              scrapedProfiles.push(profile);
-              profilesScraped++;
-            } else {
-              profilesFailed++;
-            }
-          } else {
-            console.error(`❌ Profile processing failed: ${url}`, result.reason);
-            profilesFailed++;
-          }
+  const handleSaveProfile = async (profile: ScrapedProfile) => {
+    try {
+      const { error } = await supabase
+        .from('user_saved_profiles')
+        .insert({
+          user_id: user?.id,
+          profile_id: profile.id
         });
+
+      if (error) {
+        if (error.code === '23505') { // Unique constraint violation
+          setError('Profile already saved');
+        } else {
+          throw error;
+        }
       } else {
-        // Entire batch failed (unlikely), count all in batch as failed
-        console.error(`❌ Batch processing failed: batch ${bIdx + 1}`, batchResult.reason);
-        profilesFailed += scrapingBatches[bIdx].length;
+        setSuccess('Profile saved successfully!');
       }
-    });
-    
-    // Combine all profiles (from DB + scraped)
-    const allProfiles = [...profilesFromDb, ...scrapedProfiles];
-    
-    console.log(`📊 Final results: ${allProfiles.length} total profiles (${profilesFromDb.length} from DB, ${profilesScraped} scraped), ${profilesFailed} failed`);
-
-        // Update key usage
-        // Mark all used keys as used
-        const usedKeyIds = new Set(
-          scrapingBatches.map((_, idx) => {
-            const k = selectedKeys[Math.max(0, idx % Math.max(1, selectedKeys.length))];
-            return k?.id;
-          }).filter(Boolean)
-        );
-        for (const keyId of usedKeyIds) {
-        await supabase.from('api_keys').update({
-          last_used: new Date().toISOString(),
-          failure_count: 0,
-          status: 'active'
-          }).eq('id', keyId);
-        }
-
-    const processingTime = Date.now() - startTime;
-    const apiKeysUsed = usedKeyIds.size;
-
-    // Update the log with results
-    if (logId) {
-      await supabase
-        .from('scraping_logs')
-        .update({
-          status: profilesFailed === 0 ? 'completed' : 'failed',
-          api_key_used: selectedKeys[0]?.id || null,
-      profiles_scraped: profilesScraped,
-          profiles_failed: profilesFailed,
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', logId);
+    } catch (err) {
+      setError('Failed to save profile');
     }
+  };
 
-    // Auto-save profiles if requested
-    if (saveAllProfiles && scrapedProfiles.length > 0) {
-      try {
-        console.log(`💾 Auto-saving ${scrapedProfiles.length} profiles...`);
-        
-        // Check which profiles are already saved
-        const { data: existingSaved, error: checkError } = await supabase
-          .from('user_saved_profiles')
-          .select('profile_id')
-          .eq('user_id', req.user.id)
-          .in('profile_id', scrapedProfiles.map(p => p.id));
 
-        if (checkError) {
-          console.error('Error checking existing saved profiles:', checkError);
-        } else {
-          const existingProfileIds = new Set(existingSaved?.map(p => p.profile_id) || []);
-          const newProfilesToSave = scrapedProfiles.filter(p => !existingProfileIds.has(p.id));
 
-          if (newProfilesToSave.length > 0) {
-            const { error: saveError } = await supabase
-              .from('user_saved_profiles')
-              .insert(
-                newProfilesToSave.map(profile => ({
-                  user_id: req.user.id,
-                  profile_id: profile.id,
-                  tags: []
-                }))
-              );
+  const clearMessages = () => {
+    setError('');
+    setSuccess('');
+  };
 
-            if (saveError) {
-              console.error('Error auto-saving profiles:', saveError);
-            } else {
-              console.log(`✅ Auto-saved ${newProfilesToSave.length} profiles successfully!`);
-            }
-          } else {
-            console.log(`ℹ️ All profiles were already saved`);
-          }
-        }
-      } catch (autoSaveError) {
-        console.error('Error in auto-save process:', autoSaveError);
-        // Don't fail the request if auto-save fails
+  const handleSelectCommenter = (linkedinUrl: string) => {
+    setSelectedCommenters(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(linkedinUrl)) {
+        newSet.delete(linkedinUrl);
+      } else {
+        newSet.add(linkedinUrl);
       }
-    }
-
-    // Create response - ALWAYS return results to user
-    const response = {
-      success: true,
-      request_id: requestId,
-      profile_urls: validUrls,
-      profiles: allProfiles,
-      total_profiles_processed: validUrls.length,
-      profiles_from_db: profilesFromDb.length,
-      profiles_scraped: profilesScraped,
-      profiles_failed: profilesFailed,
-      processing_time_ms: processingTime,
-      api_keys_used: apiKeysUsed,
-      status: profilesFailed === 0 ? 'completed' : (allProfiles.length > 0 ? 'partial_success' : 'failed'),
-      auto_saved: saveAllProfiles ? allProfiles.length : 0,
-      message: profilesFailed > 0 ? 
-        `Processing complete! ${allProfiles.length} profiles processed (${profilesFromDb.length} from DB, ${profilesScraped} scraped), ${profilesFailed} failed.` : 
-        `All profiles processed successfully! ${allProfiles.length} profiles (${profilesFromDb.length} from DB, ${profilesScraped} scraped).`
-    };
-
-    console.log(`🎉 LinkedIn scraping completed!`);
-    console.log(`📊 Final stats:`, {
-      request_id: requestId,
-      processing_time: processingTime,
-      total_profiles: allProfiles.length,
-      profiles_from_db: profilesFromDb.length,
-      profiles_scraped: profilesScraped,
-      profiles_failed: profilesFailed
+      return newSet;
     });
+  };
 
-    res.json(response);
+  const handleSelectAllCommenters = () => {
+    const allUrls = commentData.map(comment => comment.actor?.linkedinUrl).filter(Boolean);
+    setSelectedCommenters(new Set(allUrls));
+  };
 
-  } catch (error) {
-    console.error('LinkedIn scraping error:', error);
-    
-    const processingTime = Date.now() - startTime;
-    
-    // Update log with error
-    if (logId) {
-      await supabase
-        .from('scraping_logs')
-        .update({
-      status: 'failed',
-      error_message: error.message,
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', logId);
+  const handleDeselectAllCommenters = () => {
+    setSelectedCommenters(new Set());
+  };
+
+  const handleScrapeSelectedProfiles = async () => {
+    if (selectedCommenters.size === 0) {
+      setError('Please select at least one commenter to scrape their profile');
+      return;
     }
 
-    res.status(500).json({ 
-      error: 'LinkedIn scraping failed', 
-      message: error.message,
-      request_id: requestId,
-      processing_time: processingTime
-    });
-  }
-});
+    setIsScrapingProfiles(true);
+    setError('');
+    setSuccess('');
 
-// Post comment scraping endpoint
-app.post('/api/scrape-post-comments', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  const startTime = Date.now();
-  const requestId = `cmt_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
-  let logId = null;
-  
-  try {
-    const { postUrls, scrapingType } = req.body;
-    
-    if (!postUrls || !Array.isArray(postUrls) || postUrls.length === 0) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'postUrls array is required' 
-      });
-    }
-
-    // Validate and sanitize post URLs
-    const validUrls = postUrls
-      .map(u => normalizeLinkedInUrl(u))
-      .filter(url => url && url.includes('linkedin.com/posts/'))
-      .slice(0, 10); // Limit to 10 posts per request
-
-    if (validUrls.length === 0) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'No valid LinkedIn post URLs provided' 
-      });
-    }
-
-    // Log the request (aligned with schema)
     try {
-      const { data: logRow } = await supabase
-        .from('scraping_logs')
-        .insert({
-        user_id: req.user.id,
-          scraping_type: 'post-comments',
-          input_urls: validUrls,
-          status: 'running',
-          started_at: new Date().toISOString()
-        })
-        .select('id')
-        .single();
-      logId = logRow?.id || null;
-    } catch (dbError) {
-      console.warn('⚠️ Failed to log request to database:', dbError.message);
-    }
-
-    // Determine required keys for round-robin per post
-    const failedKeysInRequest = new Set();
-    const requiredKeyCount = Math.max(1, validUrls.length);
-
-    // Get Apify keys for scraping (round-robin across comment runs)
-    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, failedKeysInRequest);
-    
-    if (!selectedKeys || selectedKeys.length === 0) {
-      return res.status(400).json({ 
-        error: 'No API keys available', 
-        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
-        status: 'failed',
-        comments: [],
-        comments_scraped: 0,
-        comments_failed: validUrls.length
-      });
-    }
-
-    console.log(`🔑 Using ${selectedKeys.length} keys for comments (round-robin)`);
-
-    let commentsScraped = 0;
-    let commentsFailed = 0;
-    const allComments = [];
-
-    // Scrape each post for comments in parallel, round-robin assign keys per post
-    const commentPromises = validUrls.map(async (postUrl, idx) => {
-      let apiKey = selectedKeys[Math.max(0, idx % Math.max(1, selectedKeys.length))];
-      let attempts = 0;
-      const maxAttempts = Math.min(3, selectedKeys.length); // Try up to 3 different keys
+      const profileUrls = Array.from(selectedCommenters);
       
-      while (attempts < maxAttempts) {
+      // Use the API base URL from environment variable, fallback to current origin for development
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+      const fullEndpoint = `${apiBaseUrl}/api/scrape-linkedin`;
+      
+      const response = await fetch(fullEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user?.webhook_token}`
+        },
+        body: JSON.stringify({ profileUrls })
+      });
+
+      if (!response.ok) {
+        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
         try {
-          console.log(`🔍 Scraping post comments: ${postUrl} (attempt ${attempts + 1}/${maxAttempts})`);
-        
-        // Use the post comments actor: ZI6ykbLlGS3APaPE8
-        const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
-          method: 'POST',
-          body: {
-            posts: [postUrl]
-          }
-        });
-
-        if (!actorRun.data?.id) {
-          throw new Error('Failed to start actor run');
-        }
-
-        const runId = actorRun.data.id;
-        console.log(`🎬 Actor run started: ${runId}`);
-
-        // Poll for completion
-        let pollAttempts = 0;
-        let runStatus = 'RUNNING';
-        
-        while (pollAttempts < 60 && runStatus === 'RUNNING') {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          pollAttempts++;
-          
-          const statusResponse = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
-          runStatus = statusResponse.data?.status;
-          
-          if (runStatus === 'FAILED') {
-            throw new Error('Actor run failed');
-          }
-        }
-
-        if (runStatus !== 'SUCCEEDED') {
-          throw new Error(`Actor run timed out or failed: ${runStatus}`);
-        }
-
-        // Get the dataset ID and fetch comments
-        const runInfo = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
-        const datasetId = runInfo.data?.defaultDatasetId;
-        
-        if (!datasetId) {
-          throw new Error('No dataset ID from actor run');
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 10000));
-
-        const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, apiKey.api_key);
-        const comments = datasetResponse || [];
-
-        if (comments.length > 0) {
-          // Don't store comments in database - just return them for display
-          allComments.push(...comments);
-          commentsScraped += comments.length;
-            break; // Success, exit retry loop
-        } else {
-          commentsFailed++;
-            break; // No comments found, exit retry loop
-        }
-
-      } catch (error) {
-          console.error(`❌ Failed to scrape post ${postUrl} with key ${apiKey.key_name}:`, error.message);
-          
-          // Check if this is an account limit error
-          if (error.message.includes('Monthly usage hard limit exceeded') || 
-              error.message.includes('platform-feature-disabled') ||
-              error.message.includes('Insufficient credits')) {
-            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed`);
-            // Mark this key as failed in the database
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString()
-            }).eq('id', apiKey.id);
-          }
-          
-          attempts++;
-          if (attempts < maxAttempts) {
-            // Try next key
-            const nextKeyIndex = (idx + attempts) % selectedKeys.length;
-            apiKey = selectedKeys[nextKeyIndex];
-            console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const errorData = await response.json();
+            errorMessage = errorData.message || errorData.error || errorMessage;
           } else {
-            console.log(`❌ All attempts failed for post ${postUrl}`);
-        commentsFailed++;
-      }
-    }
-      }
-    });
-
-    await Promise.allSettled(commentPromises);
-
-    const processingTime = Date.now() - startTime;
-
-    // Update log with results
-    if (logId) {
-      await supabase
-        .from('scraping_logs')
-        .update({
-          status: commentsFailed === 0 ? 'completed' : 'failed',
-          comments_scraped: commentsScraped,
-          comments_failed: commentsFailed,
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', logId);
-    }
-
-    // Create response - ALWAYS return results to user
-    const response = {
-      success: true,
-      request_id: requestId,
-      post_urls: validUrls,
-      comments_scraped: commentsScraped,
-      comments_failed: commentsFailed,
-      processing_time_ms: processingTime,
-      comments: allComments,
-      status: commentsFailed === 0 ? 'completed' : (commentsScraped > 0 ? 'partial_success' : 'failed'),
-      message: commentsFailed > 0 ? 
-        `Post comments scraping complete! ${commentsScraped} comments scraped successfully, ${commentsFailed} posts failed.` : 
-        `All comments scraped successfully! ${commentsScraped} comments processed.`
-    };
-
-    console.log(`🎉 Post comment scraping completed!`);
-    console.log(`📊 Results: ${commentsScraped} comments scraped, ${commentsFailed} posts failed`);
-    res.json(response);
-
-  } catch (error) {
-    console.error('Post comment scraping error:', error);
-    
-    const processingTime = Date.now() - startTime;
-    
-    if (logId) {
-      await supabase
-        .from('scraping_logs')
-        .update({
-      status: 'failed',
-      error_message: error.message,
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', logId);
-    }
-
-    res.status(500).json({ 
-      error: 'Post comment scraping failed', 
-      message: error.message,
-      request_id: requestId,
-      processing_time: processingTime
-    });
-  }
-});
-
-// Mixed scraping endpoint (post URLs → commenter profiles with parallel processing)
-app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  const startTime = Date.now();
-  const requestId = `mix_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
-  let logId = null;
-  
-  try {
-    const { postUrls, saveAllProfiles = false } = req.body;
-    
-    // Validate post URLs
-    const validPostUrls = postUrls && Array.isArray(postUrls) 
-      ? postUrls
-          .map(u => normalizeLinkedInUrl(u))
-          .filter(url => url && url.includes('linkedin.com/posts/'))
-          .slice(0, 10)
-      : [];
-
-    if (validPostUrls.length === 0) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'At least one LinkedIn post URL is required' 
-      });
-    }
-
-    // Log the request (aligned with schema)
-    try {
-      const { data: logRow } = await supabase
-        .from('scraping_logs')
-        .insert({
-        user_id: req.user.id,
-          scraping_type: 'mixed',
-          input_urls: validPostUrls,
-          status: 'running',
-          started_at: new Date().toISOString()
-        })
-        .select('id')
-        .single();
-      logId = logRow?.id || null;
-    } catch (dbError) {
-      console.warn('⚠️ Failed to log request to database:', dbError.message);
-    }
-
-    let commentsScraped = 0;
-    let commentsFailed = 0;
-    let profilesScraped = 0;
-    let profilesFromDb = 0;
-    let profilesFailed = 0;
-    const allComments = [];
-    const allProfiles = [];
-    const extractedProfileUrls = new Set();
-
-    // Step 1: Scrape post comments in parallel (round-robin assign keys per post) and extract profile URLs
-    const requiredCommentKeyCount = Math.max(1, validPostUrls.length);
-    let commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, new Set());
-    
-    // Check total active keys available (not just selected ones)
-    const { data: allActiveKeysForComments } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'apify')
-      .eq('status', 'active');
-    
-    // If we have less than 5 active keys, test all failed/rate_limited keys to reactivate them
-    if (allActiveKeysForComments.length < 5) {
-      console.log(`🔧 Less than 5 active keys (${allActiveKeysForComments.length}), testing failed/rate_limited keys...`);
-      
-      // Get all non-active keys
-      const { data: inactiveKeys } = await supabase
-        .from('api_keys')
-        .select('*')
-        .eq('user_id', req.user.id)
-        .eq('service', 'apify')
-        .in('status', ['failed', 'rate_limited']);
-      
-      if (inactiveKeys && inactiveKeys.length > 0) {
-        console.log(`🧪 Testing ${inactiveKeys.length} inactive keys...`);
-        
-        // Test each inactive key
-        const testPromises = inactiveKeys.map(async (key) => {
-          const testResult = await testAndUpdateApiKey(supabase, key);
-          if (testResult.success) {
-            console.log(`✅ Reactivated key: ${key.key_name}`);
-            return testResult.key;
-          }
-          return null;
-        });
-        
-        const testResults = await Promise.allSettled(testPromises);
-        const reactivatedKeys = testResults
-          .filter(result => result.status === 'fulfilled' && result.value)
-          .map(result => result.value);
-        
-        if (reactivatedKeys.length > 0) {
-          console.log(`🎉 Reactivated ${reactivatedKeys.length} keys!`);
-          // Get fresh key assignment with reactivated keys
-          commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, new Set());
-        }
-      }
-    }
-    
-    console.log(`🔑 Using ${commentKeys.length} active keys for comment processing`);
-    
-    if (!commentKeys || commentKeys.length === 0) {
-      return res.status(400).json({ 
-        error: 'No API keys available', 
-        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
-        status: 'failed',
-        profiles: [],
-        total_profiles_processed: 0,
-        profiles_scraped: 0,
-        profiles_failed: 0
-      });
-    }
-    const commentPromises = validPostUrls.map(async (postUrl, idx) => {
-      let apiKey = commentKeys[Math.max(0, idx % Math.max(1, commentKeys.length))];
-      let attempts = 0;
-      const maxAttempts = Math.min(3, commentKeys.length); // Try up to 3 different keys
-      
-      while (attempts < maxAttempts) {
-        try {
-          console.log(`🔍 Scraping post comments: ${postUrl} (attempt ${attempts + 1}/${maxAttempts})`);
-          const actorRun = await callApifyAPI('acts/ZI6ykbLlGS3APaPE8/runs', apiKey.api_key, {
-          method: 'POST',
-          body: { posts: [postUrl] }
-        });
-
-        if (!actorRun.data?.id) throw new Error('Failed to start actor run');
-        const runId = actorRun.data.id;
-
-        // Poll for completion
-        let pollAttempts = 0;
-        let runStatus = 'RUNNING';
-        while (pollAttempts < 60 && runStatus === 'RUNNING') {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          pollAttempts++;
-          const statusResponse = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
-          runStatus = statusResponse.data?.status;
-          if (runStatus === 'FAILED') throw new Error('Actor run failed');
-        }
-        if (runStatus !== 'SUCCEEDED') throw new Error(`Actor run timed out or failed: ${runStatus}`);
-
-        // Get comments
-        const runInfo = await callApifyAPI(`acts/ZI6ykbLlGS3APaPE8/runs/${runId}`, apiKey.api_key);
-        const datasetId = runInfo.data?.defaultDatasetId;
-        if (!datasetId) throw new Error('No dataset ID from actor run');
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, apiKey.api_key);
-        const comments = datasetResponse || [];
-
-        if (comments.length > 0) {
-          for (const comment of comments) {
-              if (comment.actor && comment.actor.linkedinUrl) {
-                extractedProfileUrls.add(comment.actor.linkedinUrl);
+            const errorText = await response.text();
+            if (errorText) {
+              errorMessage = errorText;
             }
           }
-          allComments.push(...comments);
-          commentsScraped += comments.length;
-            break; // Success, exit retry loop
-        } else {
-          commentsFailed++;
-            break; // No comments found, exit retry loop
+        } catch (parseError) {
+          console.warn('Could not parse error response:', parseError);
         }
-      } catch (error) {
-          console.error(`❌ Failed to scrape post ${postUrl} with key ${apiKey.key_name}:`, error.message);
-          
-          // Check if this is an account limit error - mark key as failed immediately
-          if (error.message.includes('Monthly usage hard limit exceeded') || 
-              error.message.includes('platform-feature-disabled') ||
-              error.message.includes('Insufficient credits') ||
-              error.message.includes('403') ||
-              error.message.includes('Rate limited')) {
-            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed immediately`);
-            // Mark this key as failed in the database immediately
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString()
-            }).eq('id', apiKey.id);
-          }
-          
-          attempts++;
-          if (attempts < maxAttempts) {
-            // Try next key
-            const nextKeyIndex = (idx + attempts) % commentKeys.length;
-            apiKey = commentKeys[nextKeyIndex];
-            console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
-          } else {
-            console.log(`❌ All attempts failed for post ${postUrl}`);
-        commentsFailed++;
+        throw new Error(errorMessage);
       }
-    }
+
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const responseText = await response.text();
+        throw new Error(`Expected JSON response but got: ${contentType || 'unknown content type'}. Response: ${responseText.substring(0, 200)}...`);
       }
-    });
-    await Promise.allSettled(commentPromises);
 
-    // Step 2: Use extracted profile URLs (no additional profile URLs needed)
-    const allProfileUrls = [...extractedProfileUrls];
-
-    // Determine profile batches and request keys accordingly (round-robin per batch)
-    const BATCH_SIZE = 10; // Changed to 10 for maximum speed as requested
-    const profileBatches = [];
-    for (let i = 0; i < allProfileUrls.length; i += BATCH_SIZE) {
-      profileBatches.push(allProfileUrls.slice(i, i + BATCH_SIZE));
-    }
-    const requiredKeyCount = Math.max(1, profileBatches.length);
-
-    // Get Apify keys for scraping - ensure we have at least 5 active keys
-    let selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, new Set());
-    
-    // Check total active keys available (not just selected ones)
-    const { data: allActiveKeysForProfiles } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'apify')
-      .eq('status', 'active');
-    
-    // If we have less than 5 active keys, test all failed/rate_limited keys to reactivate them
-    if (allActiveKeysForProfiles.length < 5) {
-      console.log(`🔧 Less than 5 active keys (${allActiveKeysForProfiles.length}), testing failed/rate_limited keys...`);
+      const data = await response.json();
       
-      // Get all non-active keys
-      const { data: inactiveKeys } = await supabase
-        .from('api_keys')
-        .select('*')
-        .eq('user_id', req.user.id)
-        .eq('service', 'apify')
-        .in('status', ['failed', 'rate_limited']);
+      setSuccess(`Successfully scraped ${data.profiles?.length || 0} profiles from selected commenters!`);
       
-      if (inactiveKeys && inactiveKeys.length > 0) {
-        console.log(`🧪 Testing ${inactiveKeys.length} inactive keys...`);
-        
-        // Test each inactive key
-        const testPromises = inactiveKeys.map(async (key) => {
-          const testResult = await testAndUpdateApiKey(supabase, key);
-          if (testResult.success) {
-            console.log(`✅ Reactivated key: ${key.key_name}`);
-            return testResult.key;
-          }
-          return null;
-        });
-        
-        const testResults = await Promise.allSettled(testPromises);
-        const reactivatedKeys = testResults
-          .filter(result => result.status === 'fulfilled' && result.value)
-          .map(result => result.value);
-        
-        if (reactivatedKeys.length > 0) {
-          console.log(`🎉 Reactivated ${reactivatedKeys.length} keys!`);
-          // Get fresh key assignment with reactivated keys
-          selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredKeyCount, new Set());
-        }
+      if (data.profiles && data.profiles.length > 0) {
+        setScrapedProfiles(prev => [...prev, ...data.profiles]);
       }
+
+      // Clear selection after successful scraping
+      setSelectedCommenters(new Set());
+
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred during profile scraping');
+    } finally {
+      setIsScrapingProfiles(false);
     }
-    
-    console.log(`🔑 Using ${selectedKeys.length} active keys for profile processing`);
-    
-    if (!selectedKeys || selectedKeys.length === 0) {
-      return res.status(400).json({ 
-        error: 'No API keys available', 
-        message: 'All your Apify API keys have hit their monthly usage limits. Please add credits to your Apify accounts or wait for monthly reset. You can also add more API keys from different accounts.',
-        status: 'failed',
-        profiles: [],
-        total_profiles_processed: allProfileUrls.length,
-        profiles_scraped: 0,
-        profiles_failed: allProfileUrls.length
-      });
-    }
+  };
 
-    console.log(`🔑 Using ${selectedKeys.length} keys for profiles (round-robin)`);
+  return (
+    <div className="p-6 max-w-7xl mx-auto">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">LinkedIn Scraper</h1>
+        <p className="text-gray-600">
+          Scrape LinkedIn posts, profiles, or both using our advanced scraping technology. Choose your scraping type below.
+        </p>
+      </div>
 
-    // Step 3: PARALLEL profile processing - check database first, then scrape in batches
-    console.log(`🚀 Starting parallel processing of ${allProfileUrls.length} profiles...`);
-    
-    // Helper function to process a single profile (with a batch-assigned key)
-    const processProfile = async (profileUrl, assignedKey) => {
-      let apiKey = assignedKey;
-      let attempts = 0;
-      const maxAttempts = Math.min(5, selectedKeys.length); // Try up to 5 different keys
-      const failedKeysInThisRequest = new Set(); // Track keys that fail in this specific request
-      
-      while (attempts < maxAttempts) {
-        try {
-          console.log(`🔍 Scraping profile: ${profileUrl} (attempt ${attempts + 1}/${maxAttempts}) with key: ${apiKey.key_name}`);
-          
-        // First, check if profile exists in our database
-        const { data: existingProfile, error: dbError } = await supabase
-          .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-          .single();
+      {/* Error and Success Messages */}
+      {error && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start">
+          <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 mr-3 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-red-800">{error}</p>
+            <button onClick={clearMessages} className="text-red-600 hover:text-red-800 text-sm mt-1">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
-        if (existingProfile && !dbError) {
-          console.log(`✅ Profile found in database: ${profileUrl}`);
-          return { profile: existingProfile, fromDb: true };
-        }
+      {success && (
+        <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-start">
+          <CheckCircle className="w-5 h-5 text-green-500 mt-0.5 mr-3 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-green-800">{success}</p>
+            <button onClick={clearMessages} className="text-green-600 hover:text-green-800 text-sm mt-1">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
-        // Profile not in database, scrape it using Apify
-          console.log(`🔄 Scraping profile: ${profileUrl} (attempt ${attempts + 1}/${maxAttempts})`);
+      {/* Scraping Type Selection */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+        <h2 className="text-xl font-semibold text-gray-900 mb-4">Scraping Type</h2>
         
-        // Use the profile details actor: 2SyF0bVxmgGr8IVCZ
-        const actorRun = await callApifyAPI('acts/2SyF0bVxmgGr8IVCZ/runs', apiKey.api_key, {
-          method: 'POST',
-          body: {
-            profileUrls: [profileUrl]
-          }
-        });
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <button
+            onClick={() => setScrapingType('post-comments')}
+            className={`p-4 rounded-lg border-2 transition-all duration-200 ${
+              scrapingType === 'post-comments'
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <div className="flex flex-col items-center text-center">
+              <MessageSquare className={`w-8 h-8 mb-2 ${
+                scrapingType === 'post-comments' ? 'text-blue-600' : 'text-gray-400'
+              }`} />
+              <h3 className="font-semibold text-gray-900">Post Comments</h3>
+              <p className="text-sm text-gray-600">Scrape post engagers</p>
+            </div>
+          </button>
 
-        if (!actorRun.data?.id) {
-          throw new Error('Failed to start actor run');
-        }
+          <button
+            onClick={() => setScrapingType('profile-details')}
+            className={`p-4 rounded-lg border-2 transition-all duration-200 ${
+              scrapingType === 'profile-details'
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <div className="flex flex-col items-center text-center">
+              <UserCheck className={`w-8 h-8 mb-2 ${
+                scrapingType === 'profile-details' ? 'text-blue-600' : 'text-gray-400'
+              }`} />
+              <h3 className="font-semibold text-gray-900">Profile Details</h3>
+              <p className="text-sm text-gray-600">Scrape profile info</p>
+            </div>
+          </button>
 
-        const runId = actorRun.data.id;
+          <button
+            onClick={() => setScrapingType('mixed')}
+            className={`p-4 rounded-lg border-2 transition-all duration-200 ${
+              scrapingType === 'mixed'
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <div className="flex flex-col items-center text-center">
+              <Users className={`w-8 h-8 mb-2 ${
+                scrapingType === 'mixed' ? 'text-blue-600' : 'text-gray-400'
+              }`} />
+              <h3 className="font-semibold text-gray-900">Mixed</h3>
+              <p className="text-sm text-gray-600">Post + Profiles</p>
+            </div>
+          </button>
+        </div>
 
-        // Poll for completion
-        let pollAttempts = 0;
-        let runStatus = 'RUNNING';
-        
-        while (pollAttempts < 60 && runStatus === 'RUNNING') {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          pollAttempts++;
+        {/* URL Input Section */}
+        {(scrapingType === 'post-comments' || scrapingType === 'mixed') && (
+          <div className="mb-4">
+            <label htmlFor="postUrls" className="block text-sm font-medium text-gray-700 mb-2">
+              LinkedIn Post URLs (one per line)
+            </label>
+            <textarea
+              id="postUrls"
+              value={postUrls}
+              onChange={(e) => setPostUrls(e.target.value)}
+              placeholder="https://www.linkedin.com/posts/..."
+              className="w-full h-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              disabled={isScraping}
+            />
+            <p className="text-sm text-gray-500 mt-1">
+              Enter one LinkedIn post URL per line. Maximum 10 posts per request.
+            </p>
+          </div>
+        )}
+
+        {scrapingType === 'profile-details' && (
+        <div className="mb-4">
+          <label htmlFor="profileUrls" className="block text-sm font-medium text-gray-700 mb-2">
+            LinkedIn Profile URLs (one per line)
+          </label>
+          <textarea
+            id="profileUrls"
+            value={profileUrls}
+            onChange={(e) => setProfileUrls(e.target.value)}
+            placeholder="https://linkedin.com/in/username1&#10;https://linkedin.com/in/username2&#10;https://linkedin.com/in/username3"
+            className="w-full h-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            disabled={isScraping}
+          />
+          <p className="text-sm text-gray-500 mt-1">
+            Enter one LinkedIn profile URL per line. Maximum 10 profiles per request.
+          </p>
+        </div>
+        )}
+
+        {/* Save All Profiles Option - Only for Profile Details and Mixed scrapers */}
+        {(scrapingType === 'profile-details' || scrapingType === 'mixed') && (
+          <div className="mb-4">
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={saveAllProfiles}
+                onChange={(e) => setSaveAllProfiles(e.target.checked)}
+                className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                disabled={isScraping}
+              />
+              <span className="text-sm font-medium text-gray-700">
+                Save all scraped profiles to my collection automatically
+              </span>
+            </label>
+            <p className="text-sm text-gray-500 mt-1 ml-6">
+              When enabled, all scraped profiles will be automatically saved to your "My Profiles" section. 
+              You can turn off your device and let the system work in the background.
+          </p>
+        </div>
+        )}
+
+        <button
+          onClick={handleScrape}
+          disabled={isScraping || (scrapingType === 'mixed' ? !postUrls.trim() : (!postUrls.trim() && !profileUrls.trim()))}
+          className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+        >
+          {isScraping ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Scraping...
+            </>
+          ) : (
+            <>
+              <Search className="w-4 h-4 mr-2" />
+              Start Scraping
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Comment Results Section */}
+      {commentData.length > 0 && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-gray-900">Post Comments ({commentData.length})</h2>
+            <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-1 bg-gray-100 rounded-md p-1">
+                <button
+                  onClick={() => setViewMode('table')}
+                  className={`px-3 py-1 text-sm rounded transition-colors duration-200 ${
+                    viewMode === 'table' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Table
+                </button>
+                <button
+                  onClick={() => setViewMode('list')}
+                  className={`px-3 py-1 text-sm rounded transition-colors duration-200 ${
+                    viewMode === 'list' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  List
+                </button>
+              </div>
+              <button
+                onClick={handleSelectAllCommenters}
+                className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200 transition-colors duration-200"
+              >
+                Select All
+              </button>
+              <button
+                onClick={handleDeselectAllCommenters}
+                className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 transition-colors duration-200"
+              >
+                Deselect All
+              </button>
+              {selectedCommenters.size > 0 && (
+                <button
+                  onClick={handleScrapeSelectedProfiles}
+                  disabled={isScrapingProfiles}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 flex items-center"
+                >
+                  {isScrapingProfiles ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Scraping {selectedCommenters.size} Profiles...
+                    </>
+                  ) : (
+                    <>
+                      <UserCheck className="w-4 h-4 mr-2" />
+                      Scrape Selected ({selectedCommenters.size})
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
           
-          const statusResponse = await callApifyAPI(`acts/2SyF0bVxmgGr8IVCZ/runs/${runId}`, apiKey.api_key);
-          runStatus = statusResponse.data?.status;
+          {viewMode === 'table' ? (
+            /* Table View */
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      SELECT
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      PICTURE
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      NAME
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      POSITION
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      COMMENT
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      ENGAGEMENT
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      DATE
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {commentData.map((comment, index) => (
+                    <tr key={comment.id || index} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <input
+                          type="checkbox"
+                          checked={selectedCommenters.has(comment.actor?.linkedinUrl || '')}
+                          onChange={() => handleSelectCommenter(comment.actor?.linkedinUrl || '')}
+                          className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                        />
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {comment.actor?.pictureUrl ? (
+                          <img
+                            src={comment.actor.pictureUrl}
+                            alt={comment.actor.name}
+                            className="w-10 h-10 rounded-full"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center text-gray-500 text-xs">
+                            No Photo
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div>
+                          <div className="text-sm font-medium text-gray-900">{comment.actor?.name}</div>
+                          <a
+                            href={comment.actor?.linkedinUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm text-blue-600 hover:text-blue-800"
+                          >
+                            View Profile
+                          </a>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="text-sm text-gray-900 max-w-xs truncate">
+                          {comment.actor?.position || 'N/A'}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="text-sm text-gray-900 max-w-md truncate">
+                          {comment.commentary}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center space-x-2 text-sm text-gray-500">
+                          {comment.engagement?.likes > 0 && (
+                            <span>{comment.engagement.likes} likes</span>
+                          )}
+                          {comment.engagement?.reactions && comment.engagement.reactions.length > 0 && (
+                            <span>{comment.engagement.reactions.reduce((sum, r) => sum + r.count, 0)} reactions</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {new Date(comment.createdAt).toLocaleDateString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            /* List View */
+          <div className="space-y-4">
+            {commentData.map((comment, index) => (
+              <div key={comment.id || index} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow duration-200">
+                <div className="flex items-start space-x-3">
+                    <div className="flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedCommenters.has(comment.actor?.linkedinUrl || '')}
+                        onChange={() => handleSelectCommenter(comment.actor?.linkedinUrl || '')}
+                        className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                      />
+                  {comment.actor?.pictureUrl && (
+                    <img
+                      src={comment.actor.pictureUrl}
+                      alt={comment.actor.name}
+                      className="w-10 h-10 rounded-full flex-shrink-0"
+                    />
+                  )}
+                    </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center space-x-2 mb-2">
+                      <h3 className="font-semibold text-gray-900 truncate">{comment.actor?.name}</h3>
+                      <a
+                        href={comment.actor?.linkedinUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 text-sm"
+                      >
+                        View Profile
+                      </a>
+                    </div>
+                    <p className="text-sm text-gray-600 mb-2">{comment.actor?.position}</p>
+                    <p className="text-gray-800 mb-2">{comment.commentary}</p>
+                    <div className="flex items-center space-x-4 text-sm text-gray-500">
+                      <span>{new Date(comment.createdAt).toLocaleDateString()}</span>
+                      {comment.engagement?.likes > 0 && (
+                        <span>{comment.engagement.likes} likes</span>
+                      )}
+                      {comment.engagement?.reactions && comment.engagement.reactions.length > 0 && (
+                        <span>{comment.engagement.reactions.reduce((sum, r) => sum + r.count, 0)} reactions</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          )}
+        </div>
+      )}
+
+      {/* Profile Results Section */}
+      {scrapedProfiles.length > 0 && (
+        <ScrapedProfiles 
+          profiles={scrapedProfiles}
+          onProfilesSaved={() => {
+            setSuccess('Profiles saved successfully!');
+            onSuccess?.();
+          }}
+        />
+      )}
+
+      {/* Keep the old section commented out for reference
+      {scrapedProfiles.length > 0 && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h2 className="text-xl font-semibold text-gray-900 mb-4">Scraped Profiles ({scrapedProfiles.length})</h2>
           
-          if (runStatus === 'FAILED') {
-            throw new Error('Actor run failed');
-          }
-        }
-
-        if (runStatus !== 'SUCCEEDED') {
-          throw new Error(`Actor run timed out or failed: ${runStatus}`);
-        }
-
-        // Get the dataset ID and fetch profile data
-        const runInfo = await callApifyAPI(`acts/2SyF0bVxmgGr8IVCZ/runs/${runId}`, apiKey.api_key);
-        const datasetId = runInfo.data?.defaultDatasetId;
-        
-        if (!datasetId) {
-          throw new Error('No dataset ID from actor run');
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 10000));
-
-        const datasetResponse = await callApifyAPI(`datasets/${datasetId}/items`, apiKey.api_key);
-        const profileData = datasetResponse[0] || {};
-
-        if (profileData && profileData.linkedinUrl) {
-          // Helper functions for data type conversion
-          const safeInteger = (value) => {
-            if (value === null || value === undefined || value === '') return null;
-            const parsed = parseInt(value);
-            return isNaN(parsed) ? null : parsed;
-          };
-
-          const safeNumber = (value) => {
-            if (value === null || value === undefined || value === '') return null;
-            const parsed = parseFloat(value);
-            return isNaN(parsed) ? null : parsed;
-          };
-
-          const safeString = (value) => {
-            if (value === null || value === undefined) return null;
-            return String(value).trim() || null;
-          };
-
-          const safeBoolean = (value) => {
-            if (value === null || value === undefined) return null;
-            if (typeof value === 'boolean') return value;
-            if (typeof value === 'string') {
-              const lower = value.toLowerCase();
-              return lower === 'true' || lower === '1' || lower === 'yes';
-            }
-            return Boolean(value);
-          };
-
-          // Store profile in database
-          const { data: newProfile, error: insertError } = await supabase
-            .from('linkedin_profiles')
-            .upsert({
-              linkedin_url: safeString(profileData.linkedinUrl),
-              first_name: safeString(profileData.firstName),
-              last_name: safeString(profileData.lastName),
-              full_name: safeString(profileData.fullName),
-              headline: safeString(profileData.headline),
-              connections: safeInteger(profileData.connections),
-              followers: safeInteger(profileData.followers),
-              email: safeString(profileData.email),
-              mobile_number: safeString(profileData.mobileNumber),
-              job_title: safeString(profileData.jobTitle),
-              company_name: safeString(profileData.companyName),
-              company_industry: safeString(profileData.companyIndustry),
-              company_website: safeString(profileData.companyWebsite),
-              company_linkedin: safeString(profileData.companyLinkedin),
-              company_founded_in: safeNumber(profileData.companyFoundedIn),
-              company_size: safeString(profileData.companySize),
-              current_job_duration: safeString(profileData.currentJobDuration),
-              current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
-              top_skills_by_endorsements: profileData.topSkillsByEndorsements || null,
-              address_country_only: safeString(profileData.addressCountryOnly),
-              address_with_country: safeString(profileData.addressWithCountry),
-              address_without_country: safeString(profileData.addressWithoutCountry),
-              profile_pic: safeString(profileData.profilePic),
-              profile_pic_high_quality: safeString(profileData.profilePicHighQuality),
-              about: safeString(profileData.about),
-              public_identifier: safeString(profileData.publicIdentifier),
-              open_connection: safeBoolean(profileData.openConnection),
-              urn: safeString(profileData.urn),
-              creator_website: profileData.creatorWebsite || null,
-              experiences: profileData.experiences || null,
-              updates: profileData.updates || null,
-              skills: profileData.skills || null,
-              profile_pic_all_dimensions: profileData.profilePicAllDimensions || null,
-              educations: profileData.educations || null,
-              license_and_certificates: profileData.licenseAndCertificates || null,
-              honors_and_awards: profileData.honorsAndAwards || null,
-              languages: profileData.languages || null,
-              volunteer_and_awards: profileData.volunteerAndAwards || null,
-              verifications: profileData.verifications || null,
-              promos: profileData.promos || null,
-              highlights: profileData.highlights || null,
-              projects: profileData.projects || null,
-              publications: profileData.publications || null,
-              patents: profileData.patents || null,
-              courses: profileData.courses || null,
-              test_scores: profileData.testScores || null,
-              organizations: profileData.organizations || null,
-              volunteer_causes: profileData.volunteerCauses || null,
-              interests: profileData.interests || null,
-              recommendations: profileData.recommendations || null
-            }, { onConflict: 'linkedin_url' })
-            .select()
-            .single();
-
-          if (insertError) {
-            console.error('❌ Database insertion error for profile:', profileData.linkedinUrl);
-            console.error('Error details:', insertError);
-            console.error('Profile data being inserted:', {
-              linkedin_url: safeString(profileData.linkedinUrl),
-              first_name: safeString(profileData.firstName),
-              last_name: safeString(profileData.lastName),
-              full_name: safeString(profileData.fullName),
-              headline: safeString(profileData.headline),
-              connections: safeInteger(profileData.connections),
-              followers: safeInteger(profileData.followers),
-              company_founded_in: safeNumber(profileData.companyFoundedIn),
-              current_job_duration_in_yrs: safeNumber(profileData.currentJobDurationInYrs),
-              open_connection: safeBoolean(profileData.openConnection)
-            });
-            return { error: `Failed to save profile data: ${insertError.message}` };
-          } else {
-            console.log(`✅ Profile scraped and stored: ${profileUrl}`);
-
-            // Per-profile immediate auto-save to user's collection (mixed endpoint)
-            if (saveAllProfiles && newProfile?.id) {
-              try {
-                const { data: existingSaved } = await supabase
-                  .from('user_saved_profiles')
-                  .select('profile_id')
-                  .eq('user_id', req.user.id)
-                  .eq('profile_id', newProfile.id)
-                  .limit(1);
-                if (!existingSaved || existingSaved.length === 0) {
-                  await supabase.from('user_saved_profiles').insert({
-                    user_id: req.user.id,
-                    profile_id: newProfile.id,
-                    tags: []
-                  });
-                }
-              } catch (_) {}
-            }
-
-            return { profile: newProfile, fromDb: false };
-          }
-        } else {
-          return { error: 'No profile data received' };
-        }
-
-      } catch (error) {
-          console.error(`❌ Failed to process profile ${profileUrl} with key ${apiKey.key_name}:`, error.message);
-          
-          // Check if this is an account limit error - mark key as failed immediately
-          if (error.message.includes('Monthly usage hard limit exceeded') || 
-              error.message.includes('platform-feature-disabled') ||
-              error.message.includes('Insufficient credits') ||
-              error.message.includes('403') ||
-              error.message.includes('Rate limited')) {
-            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed immediately`);
-            // Mark this key as failed in the database immediately
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString()
-            }).eq('id', apiKey.id);
-            
-            // Add to failed keys for this request
-            failedKeysInThisRequest.add(apiKey.id);
-          }
-          
-          attempts++;
-          if (attempts < maxAttempts) {
-            // Find next available key (not failed in this request)
-            let nextKeyIndex = -1;
-            for (let i = 0; i < selectedKeys.length; i++) {
-              const keyIndex = (selectedKeys.indexOf(assignedKey) + attempts + i) % selectedKeys.length;
-              const candidateKey = selectedKeys[keyIndex];
-              if (!failedKeysInThisRequest.has(candidateKey.id)) {
-                nextKeyIndex = keyIndex;
-                break;
-              }
-            }
-            
-            if (nextKeyIndex !== -1) {
-              apiKey = selectedKeys[nextKeyIndex];
-              console.log(`🔄 Retrying with next available key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
-            } else {
-              console.log(`❌ No more available keys for profile ${profileUrl}`);
-              return { error: 'All keys failed in this request' };
-            }
-          } else {
-            console.log(`❌ All attempts failed for profile ${profileUrl}`);
-            return { error: error.message };
-          }
-        }
-      }
-      
-      // If we get here, all attempts failed
-      return { error: 'All key attempts failed' };
-    };
-
-    // Process ALL profile batches in parallel, each batch assigned a key via round-robin
-    console.log(`📦 Processing ${profileBatches.length} batches of up to ${BATCH_SIZE} profiles each...`);
-    const batchPromises = profileBatches.map((batch, batchIndex) => {
-      const assignedKey = selectedKeys[Math.max(0, batchIndex % Math.max(1, selectedKeys.length))];
-      return Promise.allSettled(batch.map(url => processProfile(url, assignedKey)));
-    });
-
-    const batchResults = await Promise.allSettled(batchPromises);
-
-    // Accumulate results
-    batchResults.forEach((batchResult, bIdx) => {
-      if (batchResult.status === 'fulfilled') {
-        const results = batchResult.value;
-        results.forEach((result, i) => {
-          const url = profileBatches[bIdx][i];
-        if (result.status === 'fulfilled') {
-            const { profile, fromDb } = result.value;
-          if (profile) {
-            allProfiles.push(profile);
-              if (fromDb) profilesFromDb++; else profilesScraped++;
-            } else {
-              profilesFailed++;
-            }
-          } else {
-            console.error(`❌ Profile processing failed: ${url}`, result.reason);
-            profilesFailed++;
-          }
-        });
-        } else {
-        console.error(`❌ Batch processing failed: batch ${bIdx + 1}`, batchResult.reason);
-        profilesFailed += profileBatches[bIdx].length;
-        }
-      });
-
-    const processingTime = Date.now() - startTime;
-
-    // Update log with results
-    if (logId) {
-      await supabase
-        .from('scraping_logs')
-        .update({
-          status: profilesFailed === 0 ? 'completed' : 'failed',
-          api_key_used: (selectedKeys[0]?.id || commentKeys[0]?.id || null),
-      profiles_scraped: profilesScraped,
-          profiles_failed: profilesFailed,
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', logId);
-    }
-
-    // Auto-save profiles if requested
-    if (saveAllProfiles && allProfiles.length > 0) {
-      try {
-        console.log(`💾 Auto-saving ${allProfiles.length} profiles...`);
-        
-        // Check which profiles are already saved
-        const { data: existingSaved, error: checkError } = await supabase
-          .from('user_saved_profiles')
-          .select('profile_id')
-          .eq('user_id', req.user.id)
-          .in('profile_id', allProfiles.map(p => p.id));
-
-        if (checkError) {
-          console.error('Error checking existing saved profiles:', checkError);
-        } else {
-          const existingProfileIds = new Set(existingSaved?.map(p => p.profile_id) || []);
-          const newProfilesToSave = allProfiles.filter(p => !existingProfileIds.has(p.id));
-
-          if (newProfilesToSave.length > 0) {
-            const { error: saveError } = await supabase
-              .from('user_saved_profiles')
-              .insert(
-                newProfilesToSave.map(profile => ({
-                  user_id: req.user.id,
-                  profile_id: profile.id,
-                  tags: []
-                }))
-              );
-
-            if (saveError) {
-              console.error('Error auto-saving profiles:', saveError);
-            } else {
-              console.log(`✅ Auto-saved ${newProfilesToSave.length} profiles successfully!`);
-            }
-          } else {
-            console.log(`ℹ️ All profiles were already saved`);
-          }
-        }
-      } catch (autoSaveError) {
-        console.error('Error in auto-save process:', autoSaveError);
-        // Don't fail the request if auto-save fails
-      }
-    }
-
-    // Create response - ALWAYS return results to user
-    const response = {
-      success: true,
-      request_id: requestId,
-      post_urls: validPostUrls,
-      comments_scraped: commentsScraped,
-      comments_failed: commentsFailed,
-      total_profiles_processed: allProfileUrls.length,
-      profiles_from_database: profilesFromDb,
-      profiles_scraped: profilesScraped,
-      profiles_failed: profilesFailed,
-      processing_time_ms: processingTime,
-      profiles: allProfiles,
-      comments: allComments,
-      status: profilesFailed === 0 ? 'completed' : (allProfiles.length > 0 ? 'partial_success' : 'failed'),
-      auto_saved: saveAllProfiles ? allProfiles.length : 0,
-      message: profilesFailed > 0 ? 
-        `Mixed scraping complete! ${commentsScraped} comments scraped, ${allProfiles.length} profiles processed (${profilesFromDb} from DB, ${profilesScraped} scraped), ${profilesFailed} profiles failed.` : 
-        `Mixed scraping successful! ${commentsScraped} comments scraped, ${allProfiles.length} profiles processed (${profilesFromDb} from DB, ${profilesScraped} scraped).`
-    };
-
-    console.log(`🎉 Mixed scraping completed! Profiles: ${allProfiles.length} (${profilesFromDb} from DB, ${profilesScraped} scraped)`);
-    console.log(`📊 Results: ${allProfiles.length} profiles processed, ${profilesFailed} failed`);
-    res.json(response);
-
-  } catch (error) {
-    console.error('Mixed scraping error:', error);
-    
-    const processingTime = Date.now() - startTime;
-    
-    if (logId) {
-      await supabase
-        .from('scraping_logs')
-        .update({
-      status: 'failed',
-      error_message: error.message,
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', logId);
-    }
-
-    res.status(500).json({ 
-      error: 'Mixed scraping failed', 
-      message: error.message,
-      request_id: requestId,
-      processing_time: processingTime
-    });
-  }
-});
-
-// Get user's saved profiles
-app.get('/api/saved-profiles', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { data: savedProfiles, error } = await supabase
-      .rpc('get_user_saved_profiles', { user_uuid: req.user.id });
-
-    if (error) {
-      throw error;
-    }
-
-    res.json({ profiles: savedProfiles || [] });
-  } catch (error) {
-    console.error('Error fetching saved profiles:', error);
-    res.status(500).json({ error: 'Failed to fetch saved profiles', message: error.message });
-  }
-});
-
-// Save a profile to user's collection
-app.post('/api/save-profile', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { profile_id, notes, tags } = req.body;
-    
-    if (!profile_id) {
-      return res.status(400).json({ error: 'profile_id is required' });
-    }
-
-    const { data, error } = await supabase
-      .from('user_saved_profiles')
-      .insert({
-        user_id: req.user.id,
-        profile_id,
-        notes: notes || '',
-        tags: tags || []
-      })
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === '23505') { // Unique constraint violation
-        return res.status(409).json({ error: 'Profile already saved' });
-      }
-      throw error;
-    }
-
-    res.json({ success: true, saved_profile: data });
-  } catch (error) {
-    console.error('Error saving profile:', error);
-    res.status(500).json({ error: 'Failed to save profile', message: error.message });
-  }
-});
-
-// Remove a profile from user's collection
-app.delete('/api/save-profile/:id', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    const { error } = await supabase
-      .from('user_saved_profiles')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', req.user.id);
-
-    if (error) {
-      throw error;
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error removing saved profile:', error);
-    res.status(500).json({ error: 'Failed to remove saved profile', message: error.message });
-  }
-});
-
-// Update notes for a saved profile
-app.put('/api/save-profile/:id', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { notes, tags } = req.body;
-    
-    const { data, error } = await supabase
-      .from('user_saved_profiles')
-      .update({ 
-        notes: notes || '',
-        tags: tags || []
-      })
-      .eq('id', id)
-      .eq('user_id', req.user.id)
-      .select()
-      .single();
-
-    if (error) {
-      throw error;
-    }
-
-    res.json({ success: true, saved_profile: data });
-  } catch (error) {
-    console.error('Error updating saved profile:', error);
-    res.status(500).json({ error: 'Failed to update saved profile', message: error.message });
-  }
-});
-
-// Lightweight health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
-});
-
-// Test endpoint for API information
-app.get('/api/test', (_req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'LinkedIn Scraper API is running',
-    version: '1.0.0',
-    endpoints: [
-      '/api/scrape-linkedin',
-      '/api/saved-profiles',
-      '/api/save-profile',
-      '/api/test-webhook',
-      '/api/test-apify',
-      '/api/debug/keys'
-    ]
-  });
-});
-
-// Test webhook functionality
-app.post('/api/test-webhook', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    res.json({ 
-      status: 'success', 
-      message: 'Webhook test successful',
-      user_id: req.user.id,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Webhook test failed', message: error.message });
-  }
-});
-
-// Test Apify API key
-app.post('/api/test-apify', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { apiKey } = req.body;
-    
-    if (!apiKey) {
-      return res.status(400).json({ error: 'API key required' });
-    }
-
-    // Test the API key
-    const testResult = await callApifyAPI('users/me', apiKey);
-    
-      res.json({ 
-        status: 'success', 
-      message: 'Apify API key is valid',
-      user_info: testResult
-      });
-  } catch (error) {
-      res.status(400).json({ 
-      error: 'Invalid API key', 
-      message: error.message 
-      });
-  }
-});
-
-// Debug endpoint to check API keys
-app.get('/api/debug/keys', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { data: keys, error } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'apify');
-    
-    if (error) {
-      throw error;
-    }
-    
-    res.json({ 
-      status: 'success', 
-      keys: keys || [],
-      count: keys?.length || 0
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch keys', message: error.message });
-  }
-});
-
-// Catch-all handler: serve index.html only if build exists
-app.get('*', (req, res) => {
-  const indexPath = 'dist/index.html';
-  if (fs.existsSync(indexPath)) {
-  res.sendFile('index.html', { root: 'dist' });
-  } else {
-    res.status(200).send('Backend is running. Frontend build not found.');
-  }
-});
-
-// Update single profile endpoint
-app.post('/api/update-profile', async (req, res) => {
-  try {
-    const { profileId } = req.body;
-    const userId = req.headers['x-user-id'];
-
-    if (!profileId || !userId) {
-      return res.status(400).json({ error: 'Profile ID and User ID are required' });
-    }
-
-    // Get the profile from user's saved profiles
-    const { data: savedProfile, error: savedError } = await supabase
-      .from('user_saved_profiles')
-      .select('profile_id, linkedin_profiles(*)')
-      .eq('saved_profile_id', profileId)
-      .eq('user_id', userId)
-      .single();
-
-    if (savedError || !savedProfile) {
-      return res.status(404).json({ error: 'Profile not found in your saved profiles' });
-    }
-
-    const linkedinUrl = savedProfile.linkedin_profiles.linkedin_url;
-
-    // Get user's API keys
-    const { data: apiKeys, error: keysError } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'active');
-
-    if (keysError || !apiKeys || apiKeys.length === 0) {
-      return res.status(400).json({ error: 'No active API keys found' });
-    }
-
-    // Use the first available key
-    const apiKey = apiKeys[0];
-
-    // Scrape the profile using Apify
-    const profileData = await scrapeLinkedInProfile(linkedinUrl, apiKey.api_key);
-
-    if (!profileData) {
-      return res.status(500).json({ error: 'Failed to scrape profile data' });
-    }
-
-    // Update the profile in the global database
-    const { error: updateError } = await supabase
-      .from('linkedin_profiles')
-      .update({
-        ...profileData,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', savedProfile.profile_id);
-
-    if (updateError) {
-      console.error('Error updating profile:', updateError);
-      return res.status(500).json({ error: 'Failed to update profile' });
-    }
-
-    res.json({ 
-      success: true, 
-      message: 'Profile updated successfully',
-      profileId: savedProfile.profile_id
-    });
-
-  } catch (error) {
-    console.error('Error in update-profile endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Update multiple profiles endpoint
-app.post('/api/update-profiles', async (req, res) => {
-  try {
-    const { profileIds } = req.body;
-    const userId = req.headers['x-user-id'];
-
-    if (!profileIds || !Array.isArray(profileIds) || profileIds.length === 0) {
-      return res.status(400).json({ error: 'Profile IDs array is required' });
-    }
-
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    // Get user's API keys
-    const { data: apiKeys, error: keysError } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'active');
-
-    if (keysError || !apiKeys || apiKeys.length === 0) {
-      return res.status(400).json({ error: 'No active API keys found' });
-    }
-
-    const apiKey = apiKeys[0];
-    let updatedCount = 0;
-    const errors = [];
-
-    // Process profiles in parallel
-    const updatePromises = profileIds.map(async (savedProfileId) => {
-      try {
-        // Get the profile from user's saved profiles
-        const { data: savedProfile, error: savedError } = await supabase
-          .from('user_saved_profiles')
-          .select('profile_id, linkedin_profiles(*)')
-          .eq('saved_profile_id', savedProfileId)
-          .eq('user_id', userId)
-          .single();
-
-        if (savedError || !savedProfile) {
-          errors.push(`Profile ${savedProfileId} not found`);
-          return;
-        }
-
-        const linkedinUrl = savedProfile.linkedin_profiles.linkedin_url;
-
-        // Scrape the profile
-        const profileData = await scrapeLinkedInProfile(linkedinUrl, apiKey.api_key);
-
-        if (!profileData) {
-          errors.push(`Failed to scrape ${linkedinUrl}`);
-          return;
-        }
-
-        // Update the profile
-        const { error: updateError } = await supabase
-          .from('linkedin_profiles')
-          .update({
-            ...profileData,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', savedProfile.profile_id);
-
-        if (updateError) {
-          errors.push(`Failed to update ${linkedinUrl}: ${updateError.message}`);
-          return;
-        }
-
-        updatedCount++;
-      } catch (error) {
-        errors.push(`Error updating profile ${savedProfileId}: ${error.message}`);
-      }
-    });
-
-    await Promise.allSettled(updatePromises);
-
-    res.json({ 
-      success: true, 
-      updated: updatedCount,
-      total: profileIds.length,
-      errors: errors.length > 0 ? errors : undefined
-    });
-
-  } catch (error) {
-    console.error('Error in update-profiles endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Start server
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 LinkedIn Scraper API server running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔧 Test endpoint: http://localhost:${PORT}/api/test`);
-  console.log(`🌐 Frontend: http://localhost:${PORT}`);
-});
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    PICTURE
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    NAME
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    HEADLINE
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    LOCATION
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    CONNECTIONS
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    COMPANY
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    EMAIL
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    ACTIONS
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+            {scrapedProfiles.map((profile) => (
+                  <tr key={profile.id} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {profile.profile_image_url || profile.profile_pic_high_quality ? (
+                        <img
+                          src={profile.profile_image_url || profile.profile_pic_high_quality}
+                      alt={profile.full_name}
+                          className="w-10 h-10 rounded-full"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center text-gray-500 text-xs">
+                          No Photo
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">{profile.full_name}</div>
+                        <a
+                          href={profile.linkedin_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-blue-600 hover:text-blue-800"
+                        >
+                          View Profile
+                        </a>
+                  </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="text-sm text-gray-900 max-w-xs truncate">
+                        {profile.headline}
+                </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center text-sm text-gray-900">
+                        <MapPin className="w-3 h-3 mr-1 text-gray-400" />
+                        {profile.location || 'N/A'}
+                </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center text-sm text-gray-900">
+                        <Users className="w-3 h-3 mr-1 text-gray-400" />
+                        {(profile.connection_count || profile.connections)?.toLocaleString() || 'N/A'}
+                  </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-900">
+                        {profile.company_name || 'N/A'}
+                </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="text-sm text-gray-900 max-w-xs truncate">
+                        {profile.email || 'N/A'}
+                </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => handleSaveProfile(profile)}
+                          className="inline-flex items-center px-2 py-1 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200"
+                  >
+                    <Save className="w-3 h-3 mr-1" />
+                    Save
+                  </button>
+                  <button
+                          onClick={() => copyToClipboard(profile.linkedin_url)}
+                          className="inline-flex items-center px-2 py-1 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200"
+                    title="Copy profile URL"
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                  <a
+                          href={profile.linkedin_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                          className="inline-flex items-center px-2 py-1 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200"
+                    title="Open profile"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                    </td>
+                  </tr>
+            ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      */}
+
+      {/* Instructions */}
+      <div className="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-blue-900 mb-3">How it works</h3>
+        <div className="space-y-2 text-sm text-blue-800">
+          <p>• <strong>Post Comments:</strong> Enter LinkedIn post URLs to scrape commenters and their profiles</p>
+          <p>• <strong>Profile Details:</strong> Enter LinkedIn profile URLs to scrape detailed profile information</p>
+          <p>• <strong>Mixed:</strong> Enter LinkedIn post URLs to scrape both comments and commenter profiles</p>
+          <p>• Save interesting profiles to your personal collection</p>
+          <p>• View analytics and track your scraping history</p>
+        </div>
+      </div>
+    </div>
+  );
+};
