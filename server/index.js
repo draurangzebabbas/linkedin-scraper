@@ -612,8 +612,44 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     
     console.log(`🔑 Using ${selectedKeys.length} active keys for processing`);
     
+    // Check if we have any profiles from database first
+    console.log(`📊 Database check complete: ${profilesFromDb.length} found, ${profilesToScrape.length} to scrape`);
+    
+    // If no API keys but we have database profiles, return them
+    if ((!selectedKeys || selectedKeys.length === 0) && profilesFromDb.length > 0) {
+      console.log(`⚠️ No API keys available, but returning ${profilesFromDb.length} profiles from database`);
+      
+      const response = {
+        success: true,
+        status: 'partial_success',
+        message: `Found ${profilesFromDb.length} profiles in database! No API keys available for scraping remaining profiles.`,
+        profiles: profilesFromDb,
+        total_profiles_processed: validUrls.length,
+        profiles_from_db: profilesFromDb.length,
+        profiles_scraped: 0,
+        profiles_failed: profilesToScrape.length,
+        processing_time_ms: Date.now() - startTime,
+        warning: 'Some profiles could not be scraped due to API key limits. Database profiles are still available.'
+      };
+      
+      if (logId) {
+        await supabase
+          .from('scraping_logs')
+          .update({
+            status: 'partial_success',
+            profiles_scraped: 0,
+            profiles_failed: profilesToScrape.length,
+            completed_at: new Date().toISOString()
+          })
+          .eq('id', logId);
+      }
+      
+      return res.json(response);
+    }
+    
+    // If no API keys and no database profiles, then fail
     if (!selectedKeys || selectedKeys.length === 0) {
-      console.log(`❌ No API keys available for user ${req.user.id}`);
+      console.log(`❌ No API keys available and no profiles in database for user ${req.user.id}`);
       
       if (logId) {
         await supabase
@@ -642,48 +678,10 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     let profilesScraped = 0;
     let profilesFailed = 0;
 
-        // 🚀 CRYSTAL CLEAR PROFILE PROCESSING - Database First Approach
+    // 🚀 CRYSTAL CLEAR PROFILE PROCESSING - Database First Approach
     console.log(`🚀 Starting crystal clear processing of ${validUrls.length} profiles...`);
     
-    // Step 1: Check database first and save to user's collection
-    console.log(`📋 Step 1: Checking database for existing profiles...`);
-    const profilesFromDb = [];
-    const profilesToScrape = [];
-    
-    for (const profileUrl of validUrls) {
-      const { data: existingProfile } = await supabase
-          .from('linkedin_profiles')
-          .select('*')
-          .eq('linkedin_url', profileUrl)
-        .single();
-      
-      if (existingProfile) {
-        console.log(`✅ Profile found in database: ${profileUrl}`);
-        profilesFromDb.push(existingProfile);
-        
-        // Save to user's collection if not already saved
-        const { data: existingSaved } = await supabase
-          .from('user_saved_profiles')
-          .select('profile_id')
-          .eq('user_id', req.user.id)
-          .eq('profile_id', existingProfile.id)
-          .limit(1);
-
-        if (!existingSaved || existingSaved.length === 0) {
-          await supabase.from('user_saved_profiles').insert({
-            user_id: req.user.id,
-            profile_id: existingProfile.id,
-            tags: []
-          });
-          console.log(`💾 Saved existing profile to user collection: ${profileUrl}`);
-        }
-      } else {
-        console.log(`🔄 Profile not in database, will scrape: ${profileUrl}`);
-        profilesToScrape.push(profileUrl);
-      }
-    }
-    
-    console.log(`📊 Database check complete: ${profilesFromDb.length} found, ${profilesToScrape.length} to scrape`);
+    // Database check already completed above, now process remaining profiles to scrape
     
     // Step 2: Process profiles that need scraping
     if (profilesToScrape.length === 0) {
