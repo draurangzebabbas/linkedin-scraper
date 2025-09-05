@@ -1,4 +1,3 @@
-//profile saving fixed
 import React, { useState, useEffect } from 'react';
 import { Search, Users, AlertCircle, CheckCircle, Loader2, MessageSquare, UserCheck } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
