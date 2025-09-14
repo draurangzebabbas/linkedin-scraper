@@ -2260,6 +2260,7 @@ app.get('/api/debug/keys', rateLimitMiddleware, authMiddleware, async (req, res)
   }
 });
 
+
 // Catch-all handler: serve index.html only if build exists
 app.get('*', (req, res) => {
   const indexPath = 'dist/index.html';
