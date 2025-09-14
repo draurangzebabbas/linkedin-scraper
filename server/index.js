@@ -612,7 +612,26 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     
     console.log(`🔑 Using ${selectedKeys.length} active keys for processing`);
     
-    // Check if we have any profiles from database first
+    // Initialize variables for tracking results
+    let profilesFromDb = [];
+    let profilesScraped = 0;
+    let profilesFailed = 0;
+    const allProfiles = [];
+    
+    // Check database first for existing profiles
+    const { data: existingProfiles } = await supabase
+      .from('linkedin_profiles')
+      .select('*')
+      .in('linkedin_url', validUrls);
+
+    const existingUrls = new Set(existingProfiles?.map(p => p.linkedin_url) || []);
+    const profilesToScrape = validUrls.filter(url => !existingUrls.has(url));
+    
+    // Add existing profiles to results
+    if (existingProfiles) {
+      profilesFromDb = existingProfiles;
+    }
+    
     console.log(`📊 Database check complete: ${profilesFromDb.length} found, ${profilesToScrape.length} to scrape`);
     
     // If no API keys but we have database profiles, return them
@@ -675,8 +694,6 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     console.log(`🔑 Found ${selectedKeys.length} Apify API keys for user ${req.user.id}`);
     
     const scrapedProfiles = [];
-    let profilesScraped = 0;
-    let profilesFailed = 0;
 
     // 🚀 CRYSTAL CLEAR PROFILE PROCESSING - Database First Approach
     console.log(`🚀 Starting crystal clear processing of ${validUrls.length} profiles...`);
@@ -1026,7 +1043,7 @@ app.post('/api/scrape-linkedin', rateLimitMiddleware, authMiddleware, async (req
     });
     
     // Combine all profiles (from DB + scraped)
-    const allProfiles = [...profilesFromDb, ...scrapedProfiles];
+    allProfiles.push(...scrapedProfiles);
     
     console.log(`📊 Final results: ${allProfiles.length} total profiles (${profilesFromDb.length} from DB, ${profilesScraped} scraped), ${profilesFailed} failed`);
 
@@ -2272,13 +2289,12 @@ app.get('*', (req, res) => {
 });
 
 // Update single profile endpoint
-app.post('/api/update-profile', async (req, res) => {
+app.post('/api/update-profile', rateLimitMiddleware, authMiddleware, async (req, res) => {
   try {
     const { profileId } = req.body;
-    const userId = req.headers['x-user-id'];
 
-    if (!profileId || !userId) {
-      return res.status(400).json({ error: 'Profile ID and User ID are required' });
+    if (!profileId) {
+      return res.status(400).json({ error: 'Profile ID is required' });
     }
 
     // Get the profile from user's saved profiles
@@ -2286,7 +2302,7 @@ app.post('/api/update-profile', async (req, res) => {
       .from('user_saved_profiles')
       .select('profile_id, linkedin_profiles(*)')
       .eq('id', profileId)
-      .eq('user_id', userId)
+      .eq('user_id', req.user.id)
       .single();
 
     if (savedError || !savedProfile) {
@@ -2343,24 +2359,19 @@ app.post('/api/update-profile', async (req, res) => {
 });
 
 // Update multiple profiles endpoint
-app.post('/api/update-profiles', async (req, res) => {
+app.post('/api/update-profiles', rateLimitMiddleware, authMiddleware, async (req, res) => {
   try {
     const { profileIds } = req.body;
-    const userId = req.headers['x-user-id'];
 
     if (!profileIds || !Array.isArray(profileIds) || profileIds.length === 0) {
       return res.status(400).json({ error: 'Profile IDs array is required' });
-    }
-
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
     }
 
     // Get user's API keys
     const { data: apiKeys, error: keysError } = await supabase
       .from('api_keys')
       .select('*')
-      .eq('user_id', userId)
+      .eq('user_id', req.user.id)
       .eq('status', 'active');
 
     if (keysError || !apiKeys || apiKeys.length === 0) {
@@ -2379,7 +2390,7 @@ app.post('/api/update-profiles', async (req, res) => {
           .from('user_saved_profiles')
           .select('profile_id, linkedin_profiles(*)')
           .eq('id', savedProfileId)
-          .eq('user_id', userId)
+          .eq('user_id', req.user.id)
           .single();
 
         if (savedError || !savedProfile) {
