@@ -1,4 +1,4 @@
-import 'dotenv/config';
+vimport 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -494,6 +494,58 @@ async function callApifyAPI(endpoint, apiKey, options = {}) {
     throw error;
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+// 🔎 Refresh key statuses by probing Apify and updating DB
+async function refreshAllKeyStatuses(supabase, userId, provider) {
+  try {
+    const { data: keys } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('provider', provider)
+      .order('last_used', { ascending: true, nullsFirst: true });
+
+    if (!keys || keys.length === 0) return;
+
+    await Promise.allSettled(keys.map(async (k) => {
+      try {
+        await callApifyAPI('users/me', k.api_key, { timeoutMs: 8000 });
+        if (k.status !== 'active') {
+          await supabase.from('api_keys').update({ status: 'active' }).eq('id', k.id);
+        }
+      } catch (err) {
+        const msg = String(err?.message || '').toLowerCase();
+        if (msg.includes('monthly usage hard limit exceeded') || msg.includes('platform-feature-disabled') || msg.includes('insufficient credits') || msg.includes('403')) {
+          await supabase.from('api_keys').update({ status: 'failed', last_failed: new Date().toISOString() }).eq('id', k.id);
+        } else if (msg.includes('rate limit') || msg.includes('429')) {
+          await supabase.from('api_keys').update({ status: 'rate_limited', last_failed: new Date().toISOString() }).eq('id', k.id);
+        }
+      }
+    }));
+  } catch (e) {
+    console.warn('⚠️ refreshAllKeyStatuses error:', e.message);
+  }
+}
+
+// 🧪 Ensure at least minActive active keys, otherwise refresh statuses
+async function ensureMinimumActiveKeys(supabase, userId, provider, minActive = 5) {
+  try {
+    const { data: active } = await supabase
+      .from('api_keys')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('provider', provider)
+      .eq('status', 'active');
+
+    const count = Array.isArray(active) ? active.length : 0;
+    if (count < minActive) {
+      console.log(`🧰 Active keys below ${minActive} (${count}). Refreshing statuses...`);
+      await refreshAllKeyStatuses(supabase, userId, provider);
+    }
+  } catch (e) {
+    console.warn('⚠️ ensureMinimumActiveKeys noop due to error:', e.message);
   }
 }
 
