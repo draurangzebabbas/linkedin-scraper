@@ -1461,9 +1461,13 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     const allProfiles = [];
     const extractedProfileUrls = new Set();
 
+    // Preflight: ensure key pool refreshed if active < 5
+    await ensureMinimumActiveKeys(supabase, req.user.id, 'apify', 5);
+
     // Step 1: Scrape post comments in parallel (round-robin assign keys per post) and extract profile URLs
     const requiredCommentKeyCount = Math.max(1, validPostUrls.length);
-    let commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, new Set());
+    const failedCommentKeysInReq = new Set();
+    let commentKeys = await getSmartKeyAssignment(supabase, req.user.id, 'apify', requiredCommentKeyCount, failedCommentKeysInReq);
     
     // Check total active keys available (not just selected ones)
     const { data: allActiveKeysForComments } = await supabase
@@ -1527,7 +1531,7 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
     const commentPromises = validPostUrls.map(async (postUrl, idx) => {
       let apiKey = commentKeys[Math.max(0, idx % Math.max(1, commentKeys.length))];
       let attempts = 0;
-      const maxAttempts = Math.min(2, commentKeys.length); // Try up to 2 different keys
+      const maxAttempts = Math.min(5, commentKeys.length); // Try up to 5 different keys
       
       while (attempts < maxAttempts) {
         try {
@@ -1575,32 +1579,46 @@ app.post('/api/scrape-mixed', rateLimitMiddleware, authMiddleware, async (req, r
         }
       } catch (error) {
           console.error(`❌ Failed to scrape post ${postUrl} with key ${apiKey.key_name}:`, error.message);
-          
-          // Check if this is an account limit error - mark key as failed immediately
-          if (error.message.includes('Monthly usage hard limit exceeded') || 
-              error.message.includes('platform-feature-disabled') ||
-              error.message.includes('Insufficient credits') ||
-              error.message.includes('403') ||
-              error.message.includes('Rate limited')) {
-            console.log(`💳 Account limit detected for key ${apiKey.key_name} - marking as failed immediately`);
-            // Mark this key as failed in the database immediately
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString()
-            }).eq('id', apiKey.id);
+
+          const errMsg = String(error.message || '').toLowerCase();
+          const isAccountIssue = errMsg.includes('monthly usage hard limit exceeded') || errMsg.includes('platform-feature-disabled') || errMsg.includes('insufficient credits') || errMsg.includes('403');
+          const isRateLimited = errMsg.includes('rate limit') || errMsg.includes('429') || errMsg.includes('rate limited');
+
+          failedCommentKeysInReq.add(apiKey.id);
+          if (isAccountIssue) {
+            await supabase.from('api_keys').update({ status: 'failed', last_failed: new Date().toISOString() }).eq('id', apiKey.id);
+          } else if (isRateLimited) {
+            await supabase.from('api_keys').update({ status: 'rate_limited', last_failed: new Date().toISOString() }).eq('id', apiKey.id);
           }
-          
+
           attempts++;
           if (attempts < maxAttempts) {
-            // Try next key
-            const nextKeyIndex = (idx + attempts) % commentKeys.length;
-            apiKey = commentKeys[nextKeyIndex];
-            console.log(`🔄 Retrying with next key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+            // Prefer a fresh replacement key from DB that is not failed in this request
+            const replacement = await getReplacementKey(supabase, req.user.id, 'apify', failedCommentKeysInReq);
+            if (replacement) {
+              apiKey = replacement;
+              console.log(`🔄 Retrying with replacement key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+            } else {
+              // Fallback to next available from current selection excluding failed
+              let nextKey = null;
+              for (let i = 1; i <= commentKeys.length; i++) {
+                const candidate = commentKeys[(idx + attempts + i) % commentKeys.length];
+                if (!failedCommentKeysInReq.has(candidate.id)) { nextKey = candidate; break; }
+              }
+              if (nextKey) {
+                apiKey = nextKey;
+                console.log(`🔄 Retrying with next available key: ${apiKey.key_name} (attempt ${attempts + 1}/${maxAttempts})`);
+              } else {
+                console.log(`❌ No more available keys for post ${postUrl}`);
+                commentsFailed++;
+                break;
+              }
+            }
           } else {
             console.log(`❌ All attempts failed for post ${postUrl}`);
-        commentsFailed++;
-      }
-    }
+            commentsFailed++;
+          }
+        }
       }
     });
     await Promise.allSettled(commentPromises);
